@@ -4,6 +4,7 @@ from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo import ReturnDocument
+from fastapi.middleware.cors import CORSMiddleware
 
 from .database import items
 from .digilocker import router as digilocker_router
@@ -14,6 +15,21 @@ app = FastAPI(
     title="Junction Backend",
     description="A small CRUD API backed by MongoDB.",
     version="1.0.0",
+)
+
+# Allow your Netlify frontend domain
+origins = [
+    "https://junctionfrontweb.netlify.app",  # production frontend
+    "https://junctionbackoffice.netlify.app",  # if you also use backoffice
+    "http://localhost:4200",  # local dev testing
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,          # domains allowed to call your backend
+    allow_credentials=True,
+    allow_methods=["*"],            # GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],            # headers like Authorization, Content-Type
 )
 app.include_router(login_router)
 app.include_router(digilocker_router)
