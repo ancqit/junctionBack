@@ -1,0 +1,21 @@
+import os
+
+from pymongo import MongoClient
+
+
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://invalid:27017")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "junction")
+
+mongo_client = MongoClient(
+    MONGODB_URL,
+    maxPoolSize=int(os.getenv("MONGODB_MAX_POOL_SIZE", "100")),
+    minPoolSize=int(os.getenv("MONGODB_MIN_POOL_SIZE", "5")),
+    maxIdleTimeMS=60_000,
+    serverSelectionTimeoutMS=10_000,
+    retryWrites=True,
+)
+database = mongo_client[MONGODB_DATABASE]
+items = database["items"]
+users = database["users"]
+otp_requests = database["otp_requests"]
+digilocker_states = database["digilocker_states"]
