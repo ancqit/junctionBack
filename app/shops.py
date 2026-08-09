@@ -185,7 +185,7 @@ def update_shop(
     city = changes.get("city", existing.get("city", ""))
     locality = changes.get("locality", existing.get("locality", ""))
     if "city" in changes or "locality" in changes:
-        city, locality = validate_city_and_locality(city, locality)
+        city, locality = ensure_city_and_locality(city, locality)
         changes["city"] = city
         changes["locality"] = locality
 
