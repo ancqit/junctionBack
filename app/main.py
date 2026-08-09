@@ -11,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import items
 from .digilocker import router as digilocker_router
+from .employees import router as employees_router
 from .login import router as login_router
+from .products import router as products_router
 from .profile import router as profile_router
 
 app = FastAPI(
@@ -38,6 +40,8 @@ app.add_middleware(
 app.include_router(login_router)
 app.include_router(digilocker_router)
 app.include_router(profile_router)
+app.include_router(products_router)
+app.include_router(employees_router)
 
 
 class ItemCreate(BaseModel):
