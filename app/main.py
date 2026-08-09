@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
 from datetime import datetime, timezone
+import os
+import re
 
 load_dotenv()
 
@@ -20,20 +22,27 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Allow frontend domains (Netlify, Vercel, local dev)
-origins = [
+DEFAULT_CORS_ORIGINS = [
     "https://junctionfrontweb.netlify.app",
-    "https://junction-frontweb.vercel.app",  # production frontend (Vercel)
+    "https://junction-frontweb.vercel.app",
     "https://junctionbackoffice.netlify.app",
     "http://localhost:4200",
 ]
+extra_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+origins = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + extra_origins))
+vercel_origin_pattern = re.compile(r"https://[\w-]+\.vercel\.app$")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # domains allowed to call your backend
+    allow_origins=origins,
+    allow_origin_regex=vercel_origin_pattern.pattern,
     allow_credentials=True,
-    allow_methods=["*"],            # GET, POST, PUT, DELETE, etc.
-    allow_headers=["*"],            # headers like Authorization, Content-Type
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 app.include_router(login_router)
 app.include_router(digilocker_router)
