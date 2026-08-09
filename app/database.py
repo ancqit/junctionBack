@@ -16,6 +16,8 @@ mongo_client = MongoClient(
 )
 database = mongo_client[MONGODB_DATABASE]
 items = database["items"]
+products = database["products"]
+employees = database["employees"]
 users = database["users"]
 otp_requests = database["otp_requests"]
 digilocker_states = database["digilocker_states"]
