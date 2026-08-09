@@ -16,7 +16,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
-from .plan_service import PlanSummary, build_plan_summary, expire_trial_if_needed, initialize_user_plan
+from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -129,7 +129,7 @@ def token_response(user: dict) -> TokenResponse:
         refreshed = users.find_one({"_id": user["_id"]})
         if refreshed is not None:
             user = refreshed
-    user = expire_trial_if_needed(user)
+    user = restore_persisted_plan(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
@@ -153,7 +153,7 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     user = users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise error
-    return expire_trial_if_needed(user)
+    return restore_persisted_plan(user)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)

@@ -74,6 +74,7 @@ class PlanSummary(BaseModel):
     days_remaining: int | None = None
     is_active: bool
     trial_used: bool
+    selected_plan_type: PlanType | None = None
 
 
 class PlanOption(BaseModel):
@@ -107,16 +108,63 @@ def default_plan_document() -> dict:
         "started_at": now,
         "ends_at": now + timedelta(days=TRIAL_DAYS),
         "trial_used": True,
+        "selected_plan_type": None,
+    }
+
+
+def is_paid_plan(plan_type: str | None) -> bool:
+    return plan_type in {
+        PlanType.starter.value,
+        PlanType.growth.value,
+        PlanType.premium.value,
     }
 
 
 def initialize_user_plan(user_id: ObjectId) -> dict:
     plan = default_plan_document()
     users.update_one(
-        {"_id": user_id},
+        {"_id": user_id, "plan": {"$exists": False}},
         {"$set": {"plan": plan, "updated_at": utc_now()}},
     )
-    return plan
+    user = users.find_one({"_id": user_id})
+    return user.get("plan", plan) if user else plan
+
+
+def restore_persisted_plan(user: dict) -> dict:
+    """Reload plan from DB and re-apply a previously selected paid plan on login."""
+    refreshed = users.find_one({"_id": user["_id"]})
+    if refreshed is None:
+        return user
+
+    plan = refreshed.get("plan")
+    if plan is None:
+        initialize_user_plan(refreshed["_id"])
+        refreshed = users.find_one({"_id": user["_id"]}) or refreshed
+        return expire_trial_if_needed(refreshed)
+
+    selected_plan_type = plan.get("selected_plan_type")
+    if selected_plan_type is None and is_paid_plan(plan.get("type")):
+        selected_plan_type = plan.get("type")
+
+    if is_paid_plan(selected_plan_type):
+        now = utc_now()
+        updated = users.find_one_and_update(
+            {"_id": refreshed["_id"]},
+            {
+                "$set": {
+                    "plan.type": selected_plan_type,
+                    "plan.selected_plan_type": selected_plan_type,
+                    "plan.status": PlanStatus.active.value,
+                    "plan.ends_at": None,
+                    "plan.restored_at": now,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return updated or refreshed
+
+    return expire_trial_if_needed(refreshed)
 
 
 def expire_trial_if_needed(user: dict) -> dict:
@@ -154,6 +202,11 @@ def build_plan_summary(user: dict) -> PlanSummary:
     user = expire_trial_if_needed(user)
     plan = user.get("plan") or default_plan_document()
     plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
+    selected_plan_type = plan.get("selected_plan_type")
+    if selected_plan_type is not None:
+        selected_plan_type = PlanType(selected_plan_type)
+    elif is_paid_plan(plan.get("type")):
+        selected_plan_type = plan_type
     details = PLAN_CATALOG[plan_type.value]
     status_value = PlanStatus(plan.get("status", PlanStatus.active.value))
     started_at = plan.get("started_at", utc_now())
@@ -182,6 +235,7 @@ def build_plan_summary(user: dict) -> PlanSummary:
         days_remaining=days_remaining,
         is_active=is_active,
         trial_used=bool(plan.get("trial_used", False)),
+        selected_plan_type=selected_plan_type,
     )
 
 
@@ -211,9 +265,10 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
     plan_document = {
         "type": plan_type.value,
         "status": PlanStatus.active.value,
-        "started_at": now,
+        "started_at": existing_plan.get("started_at", now),
         "ends_at": None,
         "trial_used": bool(existing_plan.get("trial_used", False)),
+        "selected_plan_type": plan_type.value,
         "selected_at": now,
     }
     updated = users.find_one_and_update(
