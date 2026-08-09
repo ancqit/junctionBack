@@ -23,7 +23,8 @@ from .plan_service import (
 )
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
 from .roles import UserRole, get_user_role
-from .database import users
+from .plan_applications import PlanApplication, serialize_application
+from .database import plan_applications, users
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -206,6 +207,12 @@ def delete_viewers(
 ) -> BulkDeleteUsersResponse:
     """Alias for DELETE /admin/users — bulk-delete viewer accounts only."""
     return delete_users(payload, _)
+
+
+@router.get("/plan-applications", response_model=list[PlanApplication])
+def list_plan_applications(_: Annotated[dict, Depends(require_admin)]) -> list[PlanApplication]:
+    documents = plan_applications.find().sort("created_at", -1)
+    return [serialize_application(document) for document in documents]
 
 
 @router.get("/role-keeper", response_model=RoleKeeperResponse)

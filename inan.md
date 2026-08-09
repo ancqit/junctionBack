@@ -133,6 +133,9 @@ Use a returned image URL with `POST /products/{id}/image/use`.
 | `GET` | `/plans/me` | Bearer | Get current user's plan status, days remaining, grace period, etc. Admins get unlimited admin plan. |
 | `POST` | `/plans/select` | Bearer | Choose a paid plan. Body: `{ "plan_type": "growth" }`. Persists on phone-based account. |
 | `POST` | `/plans/cancel` | Bearer | Cancel paid plan and enter 15-day grace period (`PLAN_GRACE_DAYS`). |
+| `GET` | `/plans/apply/preview` | Bearer | Preview plan application. Query: `plan_type`. Returns switch message if changing plans. |
+| `POST` | `/plans/apply` | Bearer | Apply for a plan. Body: `plan_type`, `shop_id`, `location` (city, state, country). Registers pending application with shop name and identity. |
+| `GET` | `/plans/applications/me` | Bearer | Get your pending plan application, if any. |
 
 **Lifecycle:**
 1. **Free trial** (15 days, `owner`) → trial ends → role becomes `viewer` immediately
@@ -166,6 +169,7 @@ All endpoints require **admin** role.
 | `GET` | `/admin/viewers` | List all users with `viewer` role. |
 | `DELETE` | `/admin/users` | Bulk-delete **viewers only**. Body: `{ "user_ids": ["id1", "id2"] }`. Owners and admins are protected and returned in `protected_owner_ids` / `protected_admin_ids`. |
 | `DELETE` | `/admin/viewers` | Alias for `DELETE /admin/users`. |
+| `GET` | `/admin/plan-applications` | List all plan applications (shop name, identity, location, requested plan, switch status). |
 
 **Admin access in production (Render):**
 ```
