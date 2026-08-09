@@ -17,14 +17,13 @@ from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
+from .role_keeper import resolve_role_from_keeper
 from .roles import DEFAULT_USER_ROLE, UserRole, get_user_role
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").lower().strip()
-ADMIN_PHONE = os.getenv("ADMIN_PHONE", "").strip()
 PBKDF2_ITERATIONS = 600_000
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", "5"))
 GCP_IDENTITY_PLATFORM_API_KEY = os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "")
@@ -141,11 +140,19 @@ def user_summary(document: dict) -> UserSummary:
 
 
 def resolve_role_for_user(email: str | None = None, phone_number: str | None = None) -> str:
-    if ADMIN_EMAIL and email and email.lower() == ADMIN_EMAIL:
-        return UserRole.admin.value
-    if ADMIN_PHONE and phone_number == ADMIN_PHONE:
-        return UserRole.admin.value
-    return DEFAULT_USER_ROLE.value
+    return resolve_role_from_keeper(email=email, phone_number=phone_number)
+
+
+def sync_role_from_keeper(user: dict) -> dict:
+    role = resolve_role_for_user(email=user.get("email"), phone_number=user.get("phone_number"))
+    if user.get("role") == role:
+        return user
+    updated = users.find_one_and_update(
+        {"_id": user["_id"]},
+        {"$set": {"role": role, "updated_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or user
 
 
 def ensure_account_is_active(user: dict) -> None:
@@ -177,6 +184,7 @@ def token_response(user: dict) -> TokenResponse:
         if refreshed is not None:
             user = refreshed
     user = restore_persisted_plan(user)
+    user = sync_role_from_keeper(user)
     role = get_user_role(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
