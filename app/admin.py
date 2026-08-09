@@ -18,7 +18,7 @@ from .plan_service import (
     PlanType,
     admin_activate_user_plan,
     admin_deactivate_user_plan,
-    admin_delete_viewers,
+    admin_delete_users,
     build_plan_summary,
 )
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
@@ -49,8 +49,6 @@ class AdminUserRecord(BaseModel):
     selected_plan_type: PlanType | None = None
     in_grace_period: bool = False
     days_remaining: int | None = None
-    in_viewing_period: bool = False
-    viewing_ends_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -63,22 +61,21 @@ class ViewerRecord(BaseModel):
     account_status: str
     plan_type: PlanType
     plan_status: PlanStatus
-    in_viewing_period: bool = False
-    viewing_ends_at: datetime | None = None
     days_remaining: int | None = None
     created_at: datetime
     updated_at: datetime
 
 
-class BulkDeleteViewersRequest(BaseModel):
+class BulkDeleteUsersRequest(BaseModel):
     user_ids: list[str]
 
 
-class BulkDeleteViewersResponse(BaseModel):
+class BulkDeleteUsersResponse(BaseModel):
     deleted_count: int
     deleted_ids: list[str]
     not_found_ids: list[str]
-    skipped_ids: list[str]
+    protected_owner_ids: list[str]
+    protected_admin_ids: list[str]
 
 
 class UpdateUserRoleRequest(BaseModel):
@@ -116,8 +113,6 @@ def serialize_admin_user(user: dict) -> AdminUserRecord:
         selected_plan_type=plan.selected_plan_type,
         in_grace_period=plan.in_grace_period,
         days_remaining=plan.days_remaining,
-        in_viewing_period=plan.in_viewing_period,
-        viewing_ends_at=plan.viewing_ends_at,
         created_at=user["created_at"],
         updated_at=user["updated_at"],
     )
@@ -133,8 +128,6 @@ def serialize_viewer(user: dict) -> ViewerRecord:
         account_status=user.get("account_status", "active"),
         plan_type=plan.type,
         plan_status=plan.status,
-        in_viewing_period=plan.in_viewing_period,
-        viewing_ends_at=plan.viewing_ends_at,
         days_remaining=plan.days_remaining,
         created_at=user["created_at"],
         updated_at=user["updated_at"],
@@ -193,16 +186,26 @@ def list_viewers(_: Annotated[dict, Depends(require_admin)]) -> list[ViewerRecor
     return [serialize_viewer(document) for document in documents]
 
 
-@router.delete("/viewers", response_model=BulkDeleteViewersResponse)
-def delete_viewers(
-    payload: BulkDeleteViewersRequest,
+@router.delete("/users", response_model=BulkDeleteUsersResponse)
+def delete_users(
+    payload: BulkDeleteUsersRequest,
     _: Annotated[dict, Depends(require_admin)],
-) -> BulkDeleteViewersResponse:
+) -> BulkDeleteUsersResponse:
+    """Delete viewer accounts only. Shop owners and admins can never be deleted."""
     if not payload.user_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide at least one user_id")
     object_ids = [parse_object_id(user_id, "User") for user_id in payload.user_ids]
-    result = admin_delete_viewers(object_ids)
-    return BulkDeleteViewersResponse(**result)
+    result = admin_delete_users(object_ids)
+    return BulkDeleteUsersResponse(**result)
+
+
+@router.delete("/viewers", response_model=BulkDeleteUsersResponse)
+def delete_viewers(
+    payload: BulkDeleteUsersRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> BulkDeleteUsersResponse:
+    """Alias for DELETE /admin/users — bulk-delete viewer accounts only."""
+    return delete_users(payload, _)
 
 
 @router.get("/role-keeper", response_model=RoleKeeperResponse)

@@ -135,9 +135,9 @@ Use a returned image URL with `POST /products/{id}/image/use`.
 | `POST` | `/plans/cancel` | Bearer | Cancel paid plan and enter 15-day grace period (`PLAN_GRACE_DAYS`). |
 
 **Lifecycle:**
-1. **Free trial** (15 days) → trial ends → **viewing period** (15 days, role → `viewer`)
-2. **Paid plan cancelled** → **grace period** (15 days, still `owner`) → grace ends → **viewing period** (15 days, role → `viewer`)
-3. **Viewing period** ends → plan `expired`, user stays `viewer` until admin deletes
+1. **Free trial** (15 days, `owner`) → trial ends → role becomes `viewer` immediately
+2. **Starter / Growth / Premium** expires or is cancelled → **grace period** (15 days, still `owner`) → grace ends → role becomes `viewer`
+3. Admin can delete `viewer` accounts only — **shop owners can never be deleted**
 4. User can re-subscribe via `POST /plans/select` to restore `owner` access
 
 | Plan | Price | Products | Notes |
@@ -163,8 +163,9 @@ All endpoints require **admin** role.
 | `PUT` | `/admin/role-keeper` | Update role keeper mappings. Admins cannot be added here. |
 | `GET` | `/admin/admins` | View loaded admin list (from env vars + `admin.json`). |
 | `POST` | `/admin/admins/refresh` | Reload admin list from disk/env without redeploying. |
-| `GET` | `/admin/viewers` | List all users with `viewer` role (includes viewing period status). |
-| `DELETE` | `/admin/viewers` | Bulk-delete viewer accounts. Body: `{ "user_ids": ["id1", "id2"] }`. Only `viewer` role users are deleted; others are skipped. |
+| `GET` | `/admin/viewers` | List all users with `viewer` role. |
+| `DELETE` | `/admin/users` | Bulk-delete **viewers only**. Body: `{ "user_ids": ["id1", "id2"] }`. Owners and admins are protected and returned in `protected_owner_ids` / `protected_admin_ids`. |
+| `DELETE` | `/admin/viewers` | Alias for `DELETE /admin/users`. |
 
 **Admin access in production (Render):**
 ```
