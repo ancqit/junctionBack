@@ -215,6 +215,12 @@ def list_plan_applications(_: Annotated[dict, Depends(require_admin)]) -> list[P
     return [serialize_application(document) for document in documents]
 
 
+@router.get("/waitlist", response_model=list[PlanApplication])
+def list_waitlist(_: Annotated[dict, Depends(require_admin)]) -> list[PlanApplication]:
+    """Alias for GET /admin/plan-applications."""
+    return list_plan_applications(_)
+
+
 @router.get("/role-keeper", response_model=RoleKeeperResponse)
 def get_role_keeper(_: Annotated[dict, Depends(require_admin)]) -> RoleKeeperResponse:
     document = get_role_keeper_document()

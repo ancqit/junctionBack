@@ -22,6 +22,7 @@ from .products import router as products_router
 from .profile import router as profile_router
 from .queries import router as queries_router
 from .shops import router as shops_router
+from .waitlist import router as waitlist_router
 
 app = FastAPI(
     title="Junction Backend",
@@ -54,6 +55,7 @@ app.include_router(queries_router)
 app.include_router(locations_router)
 app.include_router(plans_router)
 app.include_router(plan_applications_router)
+app.include_router(waitlist_router)
 app.include_router(admin_router)
 app.include_router(shops_router)
 
