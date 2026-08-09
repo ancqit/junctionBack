@@ -21,8 +21,7 @@ app = FastAPI(
 )
 
 # Allow frontend domains (Netlify, Vercel, local dev)
-origins = [ 
-    # if you also use backoffice
+origins = [    # if you also use backoffice
     
     "http://localhost:4211",  # local dev testing
     "https://junction-frontweb.vercel.app",
