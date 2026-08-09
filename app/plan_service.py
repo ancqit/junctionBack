@@ -8,10 +8,12 @@ from pydantic import BaseModel
 from pymongo import ReturnDocument
 
 from .database import products, users
+from .role_keeper import resolve_role_from_keeper
 from .roles import UserRole, get_user_role
 
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
 GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
+VIEWING_DAYS = int(os.getenv("PLAN_VIEWING_DAYS", "15"))
 
 
 class PlanType(str, Enum):
@@ -24,6 +26,7 @@ class PlanType(str, Enum):
 class PlanStatus(str, Enum):
     active = "active"
     grace_period = "grace_period"
+    viewing_period = "viewing_period"
     expired = "expired"
     cancelled = "cancelled"
     deactivated = "deactivated"
@@ -81,6 +84,8 @@ class PlanSummary(BaseModel):
     selected_plan_type: PlanType | None = None
     in_grace_period: bool = False
     grace_ends_at: datetime | None = None
+    in_viewing_period: bool = False
+    viewing_ends_at: datetime | None = None
 
 
 class PlanOption(BaseModel):
@@ -124,6 +129,8 @@ def admin_plan_summary() -> PlanSummary:
         selected_plan_type=None,
         in_grace_period=False,
         grace_ends_at=None,
+        in_viewing_period=False,
+        viewing_ends_at=None,
     )
 
 
@@ -171,9 +178,14 @@ def restore_persisted_plan(user: dict) -> dict:
         initialize_user_plan(refreshed["_id"])
         refreshed = users.find_one({"_id": user["_id"]}) or refreshed
         refreshed = expire_trial_if_needed(refreshed)
-        return expire_grace_period_if_needed(refreshed)
+        refreshed = expire_grace_period_if_needed(refreshed)
+        return expire_viewing_period_if_needed(refreshed)
 
-    if plan.get("status") not in {PlanStatus.grace_period.value, PlanStatus.deactivated.value}:
+    if plan.get("status") not in {
+        PlanStatus.grace_period.value,
+        PlanStatus.deactivated.value,
+        PlanStatus.viewing_period.value,
+    } and not plan.get("viewing_applied"):
         selected_plan_type = plan.get("selected_plan_type")
         if selected_plan_type is None and is_paid_plan(plan.get("type")):
             selected_plan_type = plan.get("type")
@@ -197,7 +209,29 @@ def restore_persisted_plan(user: dict) -> dict:
             refreshed = updated or refreshed
 
     refreshed = expire_trial_if_needed(refreshed)
-    return expire_grace_period_if_needed(refreshed)
+    refreshed = expire_grace_period_if_needed(refreshed)
+    return expire_viewing_period_if_needed(refreshed)
+
+
+def enter_viewing_period(user: dict) -> dict:
+    """Downgrade owner to viewer and start the 15-day viewing period."""
+    now = utc_now()
+    viewing_ends_at = now + timedelta(days=VIEWING_DAYS)
+    updated = users.find_one_and_update(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "role": UserRole.viewer.value,
+                "plan.status": PlanStatus.viewing_period.value,
+                "plan.viewing_started_at": now,
+                "plan.viewing_ends_at": viewing_ends_at,
+                "plan.viewing_applied": True,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or user
 
 
 def expire_grace_period_if_needed(user: dict) -> dict:
@@ -213,10 +247,28 @@ def expire_grace_period_if_needed(user: dict) -> dict:
         grace_ends_at = grace_ends_at.replace(tzinfo=timezone.utc)
 
     if utc_now() >= grace_ends_at:
+        return enter_viewing_period(user)
+    return user
+
+
+def expire_viewing_period_if_needed(user: dict) -> dict:
+    plan = user.get("plan")
+    if not plan or plan.get("status") != PlanStatus.viewing_period.value:
+        return user
+
+    viewing_ends_at = plan.get("viewing_ends_at")
+    if viewing_ends_at is None:
+        return user
+
+    if viewing_ends_at.tzinfo is None:
+        viewing_ends_at = viewing_ends_at.replace(tzinfo=timezone.utc)
+
+    if utc_now() >= viewing_ends_at:
         updated = users.find_one_and_update(
-            {"_id": user["_id"], "plan.status": PlanStatus.grace_period.value},
+            {"_id": user["_id"], "plan.status": PlanStatus.viewing_period.value},
             {
                 "$set": {
+                    "role": UserRole.viewer.value,
                     "plan.status": PlanStatus.expired.value,
                     "plan.closed_at": utc_now(),
                     "updated_at": utc_now(),
@@ -244,18 +296,7 @@ def expire_trial_if_needed(user: dict) -> dict:
         ends_at = ends_at.replace(tzinfo=timezone.utc)
 
     if utc_now() >= ends_at:
-        updated = users.find_one_and_update(
-            {"_id": user["_id"], "plan.type": PlanType.free_trial.value},
-            {
-                "$set": {
-                    "plan.status": PlanStatus.expired.value,
-                    "plan.closed_at": utc_now(),
-                    "updated_at": utc_now(),
-                }
-            },
-            return_document=ReturnDocument.AFTER,
-        )
-        return updated or user
+        return enter_viewing_period(user)
     return user
 
 
@@ -265,6 +306,7 @@ def build_plan_summary(user: dict) -> PlanSummary:
 
     user = expire_trial_if_needed(user)
     user = expire_grace_period_if_needed(user)
+    user = expire_viewing_period_if_needed(user)
     plan = user.get("plan") or default_plan_document()
     plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
     selected_plan_type = plan.get("selected_plan_type")
@@ -277,20 +319,22 @@ def build_plan_summary(user: dict) -> PlanSummary:
     started_at = plan.get("started_at", utc_now())
     ends_at = plan.get("ends_at")
     grace_ends_at = plan.get("grace_ends_at")
+    viewing_ends_at = plan.get("viewing_ends_at")
     in_grace_period = status_value == PlanStatus.grace_period
+    in_viewing_period = status_value == PlanStatus.viewing_period
 
     days_remaining = None
     account_status = user.get("account_status", "active")
     is_active = status_value in {PlanStatus.active, PlanStatus.grace_period} and account_status == "active"
 
-    countdown_end = grace_ends_at if in_grace_period else ends_at
+    countdown_end = viewing_ends_at if in_viewing_period else grace_ends_at if in_grace_period else ends_at
     if countdown_end is not None:
         if countdown_end.tzinfo is None:
             countdown_end = countdown_end.replace(tzinfo=timezone.utc)
         remaining = countdown_end - utc_now()
         days_remaining = max(0, remaining.days + (1 if remaining.seconds > 0 else 0))
-        if utc_now() >= countdown_end:
-            if in_grace_period or plan_type == PlanType.free_trial:
+        if utc_now() >= countdown_end and status_value in {PlanStatus.grace_period, PlanStatus.viewing_period, PlanStatus.active}:
+            if in_viewing_period or in_grace_period or plan_type == PlanType.free_trial:
                 is_active = False
 
     if status_value == PlanStatus.deactivated or account_status != "active":
@@ -312,6 +356,8 @@ def build_plan_summary(user: dict) -> PlanSummary:
         selected_plan_type=selected_plan_type,
         in_grace_period=in_grace_period,
         grace_ends_at=grace_ends_at,
+        in_viewing_period=in_viewing_period,
+        viewing_ends_at=viewing_ends_at,
     )
 
 
@@ -321,6 +367,11 @@ def require_active_plan(user: dict) -> PlanSummary:
 
     summary = build_plan_summary(user)
     if not summary.is_active:
+        if summary.in_viewing_period:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your viewing period has ended. Please choose a plan to continue.",
+            )
         if summary.in_grace_period:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -348,6 +399,12 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial has already been used")
 
     now = utc_now()
+    restored_role = resolve_role_from_keeper(
+        email=user.get("email"),
+        phone_number=user.get("phone_number"),
+    )
+    if restored_role == UserRole.admin.value:
+        restored_role = UserRole.owner.value
     plan_document = {
         "type": plan_type.value,
         "status": PlanStatus.active.value,
@@ -355,13 +412,16 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         "ends_at": None,
         "grace_ends_at": None,
         "grace_started_at": None,
+        "viewing_ends_at": None,
+        "viewing_started_at": None,
+        "viewing_applied": False,
         "trial_used": bool(existing_plan.get("trial_used", False)),
         "selected_plan_type": plan_type.value,
         "selected_at": now,
     }
     updated = users.find_one_and_update(
         {"_id": user_id},
-        {"$set": {"plan": plan_document, "updated_at": now}},
+        {"$set": {"plan": plan_document, "role": restored_role, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
     return build_plan_summary(updated)
@@ -436,11 +496,18 @@ def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
         plan_type = PlanType.starter.value
 
     now = utc_now()
+    restored_role = resolve_role_from_keeper(
+        email=user.get("email"),
+        phone_number=user.get("phone_number"),
+    )
+    if restored_role == UserRole.admin.value:
+        restored_role = UserRole.owner.value
     updated = users.find_one_and_update(
         {"_id": user_id},
         {
             "$set": {
                 "account_status": "active",
+                "role": restored_role,
                 "plan.type": plan_type,
                 "plan.status": PlanStatus.active.value,
                 "plan.selected_plan_type": plan_type,
@@ -448,6 +515,9 @@ def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
                 "plan.activated_by": "admin",
                 "plan.grace_ends_at": None,
                 "plan.grace_started_at": None,
+                "plan.viewing_ends_at": None,
+                "plan.viewing_started_at": None,
+                "plan.viewing_applied": False,
                 "updated_at": now,
             },
             "$unset": {
@@ -458,6 +528,33 @@ def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
         return_document=ReturnDocument.AFTER,
     )
     return build_plan_summary(updated)
+
+
+def admin_delete_viewers(user_ids: list[ObjectId]) -> dict:
+    deleted_ids: list[str] = []
+    not_found_ids: list[str] = []
+    skipped_ids: list[str] = []
+
+    for user_id in user_ids:
+        user = users.find_one({"_id": user_id})
+        if user is None:
+            not_found_ids.append(str(user_id))
+            continue
+        if get_user_role(user) != UserRole.viewer:
+            skipped_ids.append(str(user_id))
+            continue
+        result = users.delete_one({"_id": user_id, "role": UserRole.viewer.value})
+        if result.deleted_count:
+            deleted_ids.append(str(user_id))
+        else:
+            skipped_ids.append(str(user_id))
+
+    return {
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "not_found_ids": not_found_ids,
+        "skipped_ids": skipped_ids,
+    }
 
 
 def get_product_limit(user: dict) -> int | None:
