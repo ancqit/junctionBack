@@ -142,7 +142,7 @@ Seeded with default Indian cities and localities on first request. When a user c
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/plans` | Public | List available plans (Free Trial, Starter, Growth, Premium) with pricing and limits. |
+| `GET` | `/plans` | Public | List all plans (Free Trial, Starter, Growth, Premium). Returns `{ "plans": [...] }`. |
 | `GET` | `/plans/me` | Bearer | Get current user's plan status, days remaining, grace period, etc. Admins get unlimited admin plan. |
 | `POST` | `/plans/select` | Bearer | Choose a paid plan. Body: `{ "plan_type": "growth" }`. Persists on phone-based account. |
 | `POST` | `/plans/cancel` | Bearer | Cancel paid plan and enter 15-day grace period (`PLAN_GRACE_DAYS`). |
@@ -170,6 +170,21 @@ Seeded with default Indian cities and localities on first request. When a user c
 | Starter | ₹0 | 0 | Profile only |
 | Growth | ₹399 | 100 | |
 | Premium | ₹599 | 150+ | Unlimited |
+
+---
+
+## Terms and conditions (`/terms-and-conditions`)
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/terms-and-conditions` | Public | Returns title, version, content, and `updated_at`. |
+
+Content is configurable via Render env vars without code changes:
+
+- `TERMS_AND_CONDITIONS_TITLE`
+- `TERMS_AND_CONDITIONS_VERSION`
+- `TERMS_AND_CONDITIONS_CONTENT`
+- Or `TERMS_AND_CONDITIONS_JSON` for full JSON: `{"title":"...","version":"...","content":"..."}`
 
 ---
 
