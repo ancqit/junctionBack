@@ -25,6 +25,7 @@ class PlanStatus(str, Enum):
     grace_period = "grace_period"
     expired = "expired"
     cancelled = "cancelled"
+    deactivated = "deactivated"
 
 
 PLAN_CATALOG: dict[str, dict] = {
@@ -226,7 +227,8 @@ def build_plan_summary(user: dict) -> PlanSummary:
     in_grace_period = status_value == PlanStatus.grace_period
 
     days_remaining = None
-    is_active = status_value in {PlanStatus.active, PlanStatus.grace_period}
+    account_status = user.get("account_status", "active")
+    is_active = status_value in {PlanStatus.active, PlanStatus.grace_period} and account_status == "active"
 
     countdown_end = grace_ends_at if in_grace_period else ends_at
     if countdown_end is not None:
@@ -237,6 +239,9 @@ def build_plan_summary(user: dict) -> PlanSummary:
         if utc_now() >= countdown_end:
             if in_grace_period or plan_type == PlanType.free_trial:
                 is_active = False
+
+    if status_value == PlanStatus.deactivated or account_status != "active":
+        is_active = False
 
     return PlanSummary(
         type=plan_type,
@@ -332,6 +337,63 @@ def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
                 "plan.cancelled_at": now,
                 "updated_at": now,
             }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return build_plan_summary(updated)
+
+
+def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
+    user = users.find_one({"_id": user_id})
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    now = utc_now()
+    updated = users.find_one_and_update(
+        {"_id": user_id},
+        {
+            "$set": {
+                "account_status": "deactivated",
+                "plan.status": PlanStatus.deactivated.value,
+                "plan.deactivated_at": now,
+                "plan.deactivated_by": "admin",
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return build_plan_summary(updated)
+
+
+def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
+    user = users.find_one({"_id": user_id})
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    plan = user.get("plan") or {}
+    plan_type = plan.get("selected_plan_type") or plan.get("type") or PlanType.starter.value
+    if plan_type == PlanType.free_trial.value:
+        plan_type = PlanType.starter.value
+
+    now = utc_now()
+    updated = users.find_one_and_update(
+        {"_id": user_id},
+        {
+            "$set": {
+                "account_status": "active",
+                "plan.type": plan_type,
+                "plan.status": PlanStatus.active.value,
+                "plan.selected_plan_type": plan_type,
+                "plan.activated_at": now,
+                "plan.activated_by": "admin",
+                "plan.grace_ends_at": None,
+                "plan.grace_started_at": None,
+                "updated_at": now,
+            },
+            "$unset": {
+                "plan.deactivated_at": "",
+                "plan.deactivated_by": "",
+            },
         },
         return_document=ReturnDocument.AFTER,
     )

@@ -17,11 +17,14 @@ from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
+from .roles import DEFAULT_USER_ROLE, UserRole, get_user_role
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").lower().strip()
+ADMIN_PHONE = os.getenv("ADMIN_PHONE", "").strip()
 PBKDF2_ITERATIONS = 600_000
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", "5"))
 GCP_IDENTITY_PLATFORM_API_KEY = os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "")
@@ -48,6 +51,7 @@ class UserSummary(BaseModel):
     email: EmailStr | None = None
     phone_number: str | None = None
     display_name: str
+    role: UserRole
 
 
 class TokenResponse(BaseModel):
@@ -55,6 +59,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: UserSummary
     plan: PlanSummary
+    role: UserRole
 
 
 class OtpRequest(BaseModel):
@@ -107,7 +112,29 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def user_summary(document: dict) -> UserSummary:
-    return UserSummary(id=str(document["_id"]), email=document.get("email"), phone_number=document.get("phone_number"), display_name=document["display_name"])
+    return UserSummary(
+        id=str(document["_id"]),
+        email=document.get("email"),
+        phone_number=document.get("phone_number"),
+        display_name=document["display_name"],
+        role=get_user_role(document),
+    )
+
+
+def resolve_role_for_user(email: str | None = None, phone_number: str | None = None) -> str:
+    if ADMIN_EMAIL and email and email.lower() == ADMIN_EMAIL:
+        return UserRole.admin.value
+    if ADMIN_PHONE and phone_number == ADMIN_PHONE:
+        return UserRole.admin.value
+    return DEFAULT_USER_ROLE.value
+
+
+def ensure_account_is_active(user: dict) -> None:
+    if user.get("account_status") == "deactivated":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been deactivated by an administrator.",
+        )
 
 
 def require_gcp_otp_configuration() -> None:
@@ -124,16 +151,19 @@ def gcp_error(response: httpx.Response) -> HTTPException:
 
 
 def token_response(user: dict) -> TokenResponse:
+    ensure_account_is_active(user)
     if user.get("plan") is None:
         initialize_user_plan(user["_id"])
         refreshed = users.find_one({"_id": user["_id"]})
         if refreshed is not None:
             user = refreshed
     user = restore_persisted_plan(user)
+    role = get_user_role(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
         plan=build_plan_summary(user),
+        role=role,
     )
 
 
@@ -153,6 +183,7 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     user = users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise error
+    ensure_account_is_active(user)
     return restore_persisted_plan(user)
 
 
@@ -163,7 +194,17 @@ def register(payload: RegisterRequest) -> TokenResponse:
     if users.find_one({"email": email}) is not None:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     now = datetime.now(timezone.utc)
-    document = {"email": email, "password_hash": hash_password(payload.password), "display_name": payload.display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+    document = {
+        "email": email,
+        "password_hash": hash_password(payload.password),
+        "display_name": payload.display_name,
+        "role": resolve_role_for_user(email=email),
+        "account_status": "active",
+        "bio": None,
+        "avatar_url": None,
+        "created_at": now,
+        "updated_at": now,
+    }
     try:
         result = users.insert_one(document)
     except DuplicateKeyError:
@@ -246,7 +287,18 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
     display_name = request["display_name"].strip()
     user = users.find_one({"phone_number": payload.phone_number})
     if user is None:
-        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+        document = {
+            "phone_number": payload.phone_number,
+            "mobile_verified": True,
+            "gcp_identity_id": gcp_user_id,
+            "display_name": display_name,
+            "role": resolve_role_for_user(phone_number=payload.phone_number),
+            "account_status": "active",
+            "bio": None,
+            "avatar_url": None,
+            "created_at": now,
+            "updated_at": now,
+        }
         try:
             result = users.insert_one(document)
             initialize_user_plan(result.inserted_id)

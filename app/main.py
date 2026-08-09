@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import items
+from .admin import router as admin_router
 from .digilocker import router as digilocker_router
 from .employees import router as employees_router
 from .login import router as login_router
@@ -48,6 +49,7 @@ app.include_router(employees_router)
 app.include_router(orders_router)
 app.include_router(queries_router)
 app.include_router(plans_router)
+app.include_router(admin_router)
 
 
 class ItemCreate(BaseModel):
