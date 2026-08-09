@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -23,19 +23,8 @@ class ApplicationStatus(str, Enum):
 
 
 class ApplicationLocation(BaseModel):
-    city: str = Field(min_length=1, max_length=80)
-    state: str = Field(min_length=1, max_length=80)
-    country: str = Field(default="IN", min_length=2, max_length=2)
-    postal_code: str | None = Field(default=None, max_length=20)
-    line1: str | None = Field(default=None, max_length=160)
-
-    @field_validator("city", "state")
-    @classmethod
-    def strip_required(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("must not be blank")
-        return value
+    city: str
+    locality: str
 
 
 class ApplicantIdentity(BaseModel):
@@ -56,7 +45,6 @@ class PlanApplyPreview(BaseModel):
 class PlanApplyRequest(BaseModel):
     plan_type: PlanType
     shop_id: str = Field(min_length=1, max_length=80)
-    location: ApplicationLocation
 
 
 class PlanApplication(BaseModel):
@@ -148,6 +136,14 @@ def apply_for_plan(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admins are not subject to plan applications")
 
     shop = get_user_shop(payload.shop_id, current_user)
+    city = shop.get("city", "").strip()
+    locality = shop.get("locality", "").strip()
+    if not city or not locality:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Shop must have city and locality before applying for a plan",
+        )
+
     summary = build_plan_summary(current_user)
     current_type = summary.type
     is_switch, message = build_switch_message(current_type, payload.plan_type)
@@ -162,7 +158,7 @@ def apply_for_plan(
             "phone_number": current_user.get("phone_number"),
             "email": current_user.get("email"),
         },
-        "location": payload.location.model_dump(),
+        "location": {"city": city, "locality": locality},
         "requested_plan_type": payload.plan_type.value,
         "current_plan_type": current_type.value,
         "is_plan_switch": is_switch,

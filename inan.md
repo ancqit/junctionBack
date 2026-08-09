@@ -125,6 +125,19 @@ Use a returned image URL with `POST /products/{id}/image/use`.
 
 ---
 
+## Locations (`/locations`)
+
+Dropdown data for shop city and locality fields.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/locations/cities` | Public | List all available cities. |
+| `GET` | `/locations/localities?city=Mumbai` | Public | List localities for a selected city. |
+
+Seeded with default Indian cities and localities on first request.
+
+---
+
 ## Plans (`/plans`)
 
 | Method | Endpoint | Auth | Use |
@@ -134,7 +147,7 @@ Use a returned image URL with `POST /products/{id}/image/use`.
 | `POST` | `/plans/select` | Bearer | Choose a paid plan. Body: `{ "plan_type": "growth" }`. Persists on phone-based account. |
 | `POST` | `/plans/cancel` | Bearer | Cancel paid plan and enter 15-day grace period (`PLAN_GRACE_DAYS`). |
 | `GET` | `/plans/apply/preview` | Bearer | Preview plan application. Query: `plan_type`. Returns switch message if changing plans. |
-| `POST` | `/plans/apply` | Bearer | Apply for a plan. Body: `plan_type`, `shop_id`, `location` (city, state, country). Registers pending application with shop name and identity. |
+| `POST` | `/plans/apply` | Bearer | Apply for a plan. Body: `{ "plan_type": "premium", "shop_id": "..." }`. Uses shop name, city, and locality from the shop record. |
 | `GET` | `/plans/applications/me` | Bearer | Get your pending plan application, if any. |
 
 **Lifecycle:**
