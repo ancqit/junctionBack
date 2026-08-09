@@ -23,9 +23,12 @@ JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 PBKDF2_ITERATIONS = 600_000
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", "5"))
-GCP_IDENTITY_PLATFORM_API_KEY = os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "")
 GCP_SEND_OTP_URL = "https://identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode"
 GCP_VERIFY_OTP_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber"
+
+
+def gcp_identity_platform_api_key() -> str:
+    return os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "").strip()
 
 
 class RegisterRequest(BaseModel):
@@ -108,9 +111,11 @@ def user_summary(document: dict) -> UserSummary:
     return UserSummary(id=str(document["_id"]), email=document.get("email"), phone_number=document.get("phone_number"), display_name=document["display_name"])
 
 
-def require_gcp_otp_configuration() -> None:
-    if not GCP_IDENTITY_PLATFORM_API_KEY:
+def require_gcp_otp_configuration() -> str:
+    api_key = gcp_identity_platform_api_key()
+    if not api_key:
         raise HTTPException(status_code=503, detail="GCP Identity Platform API key is not configured")
+    return api_key
 
 
 def gcp_error(response: httpx.Response) -> HTTPException:
@@ -166,11 +171,11 @@ def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> TokenRespons
 
 @router.post("/otp/request", response_model=OtpRequestResponse)
 def request_otp(payload: OtpRequest) -> OtpRequestResponse:
-    require_gcp_otp_configuration()
+    api_key = require_gcp_otp_configuration()
     try:
         response = httpx.post(
             GCP_SEND_OTP_URL,
-            params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
+            params={"key": api_key},
             json={"phoneNumber": payload.phone_number, "recaptchaToken": payload.recaptcha_token},
             timeout=15.0,
         )
@@ -195,7 +200,7 @@ def request_otp(payload: OtpRequest) -> OtpRequestResponse:
 
 @router.post("/otp/verify", response_model=TokenResponse)
 def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
-    require_gcp_otp_configuration()
+    api_key = require_gcp_otp_configuration()
     now = datetime.now(timezone.utc)
     session_hash = hashlib.sha256(payload.session_info.encode()).hexdigest()
     request = otp_requests.find_one({"phone_number": payload.phone_number, "session_hash": session_hash, "expires_at": {"$gt": now}})
@@ -204,7 +209,7 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
     try:
         response = httpx.post(
             GCP_VERIFY_OTP_URL,
-            params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
+            params={"key": api_key},
             json={"sessionInfo": payload.session_info, "code": payload.otp},
             timeout=15.0,
         )

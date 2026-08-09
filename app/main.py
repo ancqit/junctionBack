@@ -1,7 +1,8 @@
-from dotenv import load_dotenv
 from datetime import datetime, timezone
 
-load_dotenv()
+from .env import load_environment
+
+load_environment()
 
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Response, status
