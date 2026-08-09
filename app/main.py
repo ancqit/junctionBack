@@ -23,7 +23,8 @@ app = FastAPI(
 # Allow your Netlify frontend domain
 origins = [
     "https://junctionfrontweb.netlify.app",  # production frontend
-    "https://junctionbackoffice.netlify.app",  # if you also use backoffice
+    "https://junctionbackoffice.netlify.app",
+      "https://junction-frontweb.vercel.app",  # if you also use backoffice
     "http://localhost:4200",  # local dev testing
 ]
 

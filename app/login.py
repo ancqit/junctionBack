@@ -164,6 +164,12 @@ def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> TokenRespons
     return TokenResponse(access_token=create_access_token(user["_id"]), user=user_summary(user))
 
 
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(token: Annotated[str, Depends(oauth2_scheme)]) -> TokenResponse:
+    user = get_current_user(token)
+    return TokenResponse(access_token=create_access_token(user["_id"]), user=user_summary(user))
+
+
 @router.post("/otp/request", response_model=OtpRequestResponse)
 def request_otp(payload: OtpRequest) -> OtpRequestResponse:
     require_gcp_otp_configuration()
