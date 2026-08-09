@@ -16,6 +16,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
+from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -53,6 +54,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserSummary
+    plan: PlanSummary
 
 
 class OtpRequest(BaseModel):
@@ -121,6 +123,20 @@ def gcp_error(response: httpx.Response) -> HTTPException:
     return HTTPException(status_code=400, detail=message)
 
 
+def token_response(user: dict) -> TokenResponse:
+    if user.get("plan") is None:
+        initialize_user_plan(user["_id"])
+        refreshed = users.find_one({"_id": user["_id"]})
+        if refreshed is not None:
+            user = refreshed
+    user = restore_persisted_plan(user)
+    return TokenResponse(
+        access_token=create_access_token(user["_id"]),
+        user=user_summary(user),
+        plan=build_plan_summary(user),
+    )
+
+
 def create_access_token(user_id: ObjectId) -> str:
     now = datetime.now(timezone.utc)
     return jwt.encode({"sub": str(user_id), "iat": now, "exp": now + timedelta(minutes=JWT_EXPIRE_MINUTES)}, _secret(), algorithm="HS256")
@@ -137,7 +153,7 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     user = users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise error
-    return user
+    return restore_persisted_plan(user)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -153,7 +169,9 @@ def register(payload: RegisterRequest) -> TokenResponse:
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     document["_id"] = result.inserted_id
-    return TokenResponse(access_token=create_access_token(result.inserted_id), user=user_summary(document))
+    initialize_user_plan(result.inserted_id)
+    document = users.find_one({"_id": result.inserted_id})
+    return token_response(document)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -161,13 +179,13 @@ def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> TokenRespons
     user = users.find_one({"email": form.username.lower()})
     if user is None or not verify_password(form.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password", headers={"WWW-Authenticate": "Bearer"})
-    return TokenResponse(access_token=create_access_token(user["_id"]), user=user_summary(user))
+    return token_response(user)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(token: Annotated[str, Depends(oauth2_scheme)]) -> TokenResponse:
     user = get_current_user(token)
-    return TokenResponse(access_token=create_access_token(user["_id"]), user=user_summary(user))
+    return token_response(user)
 
 
 @router.post("/otp/request", response_model=OtpRequestResponse)
@@ -225,18 +243,19 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
 
     otp_requests.delete_one({"_id": request["_id"]})
     users.create_index("phone_number", unique=True, sparse=True)
+    display_name = request["display_name"].strip()
     user = users.find_one({"phone_number": payload.phone_number})
     if user is None:
-        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": request["display_name"], "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
         try:
             result = users.insert_one(document)
-            document["_id"] = result.inserted_id
-            user = document
+            initialize_user_plan(result.inserted_id)
+            user = users.find_one({"_id": result.inserted_id})
         except DuplicateKeyError:
             user = users.find_one({"phone_number": payload.phone_number})
     user = users.find_one_and_update(
         {"_id": user["_id"]},
-        {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "updated_at": now}},
+        {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
-    return TokenResponse(access_token=create_access_token(user["_id"]), user=user_summary(user))
+    return token_response(user)
