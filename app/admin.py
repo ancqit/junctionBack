@@ -5,6 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from pymongo import ReturnDocument
 
+from .admin_registry import (
+    ADMIN_LIST_PATH,
+    get_admin_registry_loaded_at,
+    load_admin_registry,
+    refresh_admin_registry,
+)
 from .login import get_current_user
 from .plan_service import PlanSummary, PlanStatus, PlanType, admin_activate_user_plan, admin_deactivate_user_plan, build_plan_summary
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
@@ -50,6 +56,12 @@ class RoleKeeperResponse(BaseModel):
 
 class RoleKeeperUpdateRequest(BaseModel):
     mappings: dict[str, UserRole]
+
+
+class AdminRegistryResponse(BaseModel):
+    mappings: dict[str, str]
+    loaded_at: datetime | None
+    file_path: str
 
 
 def serialize_admin_user(user: dict) -> AdminUserRecord:
@@ -135,11 +147,57 @@ def update_role_keeper(
     _: Annotated[dict, Depends(require_admin)],
 ) -> RoleKeeperResponse:
     try:
-        mappings = save_role_keeper({key: value.value for key, value in payload.mappings.items()})
+        role_values = {key: value.value for key, value in payload.mappings.items()}
+        if UserRole.admin.value in role_values.values():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Admin roles are managed via admin.json, not role keeper",
+            )
+        mappings = save_role_keeper(role_values)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     document = get_role_keeper_document()
     return RoleKeeperResponse(
         mappings={key: UserRole(value) for key, value in mappings.items()},
         updated_at=document["updated_at"],
+    )
+
+
+@router.get("/admins", response_model=AdminRegistryResponse)
+def get_admin_registry(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
+    mappings = load_admin_registry()
+    return AdminRegistryResponse(
+        mappings=mappings,
+        loaded_at=get_admin_registry_loaded_at(),
+        file_path=ADMIN_LIST_PATH,
+    )
+
+
+@router.post("/admins/refresh", response_model=AdminRegistryResponse)
+def refresh_admin_registry_endpoint(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
+    mappings = refresh_admin_registry()
+    return AdminRegistryResponse(
+        mappings=mappings,
+        loaded_at=get_admin_registry_loaded_at(),
+        file_path=ADMIN_LIST_PATH,
+    )
+
+
+@router.get("/admins", response_model=AdminRegistryResponse)
+def get_admin_registry(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
+    mappings = load_admin_registry()
+    return AdminRegistryResponse(
+        mappings=mappings,
+        loaded_at=get_admin_registry_loaded_at(),
+        file_path=ADMIN_LIST_PATH,
+    )
+
+
+@router.post("/admins/refresh", response_model=AdminRegistryResponse)
+def refresh_admin_registry_endpoint(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
+    mappings = refresh_admin_registry()
+    return AdminRegistryResponse(
+        mappings=mappings,
+        loaded_at=get_admin_registry_loaded_at(),
+        file_path=ADMIN_LIST_PATH,
     )

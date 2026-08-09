@@ -178,14 +178,15 @@ def gcp_error(response: httpx.Response) -> HTTPException:
 
 def token_response(user: dict) -> TokenResponse:
     ensure_account_is_active(user)
-    if user.get("plan") is None:
-        initialize_user_plan(user["_id"])
-        refreshed = users.find_one({"_id": user["_id"]})
-        if refreshed is not None:
-            user = refreshed
-    user = restore_persisted_plan(user)
     user = sync_role_from_keeper(user)
     role = get_user_role(user)
+    if role != UserRole.admin:
+        if user.get("plan") is None:
+            initialize_user_plan(user["_id"])
+            refreshed = users.find_one({"_id": user["_id"]})
+            if refreshed is not None:
+                user = refreshed
+        user = restore_persisted_plan(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
@@ -252,7 +253,8 @@ def register(payload: RegisterRequest) -> TokenResponse:
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     document["_id"] = result.inserted_id
-    initialize_user_plan(result.inserted_id)
+    if resolve_role_for_user(email=email) != UserRole.admin.value:
+        initialize_user_plan(result.inserted_id)
     document = users.find_one({"_id": result.inserted_id})
     return token_response(document)
 
@@ -343,7 +345,8 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
         }
         try:
             result = users.insert_one(document)
-            initialize_user_plan(result.inserted_id)
+            if resolve_role_for_user(phone_number=payload.phone_number) != UserRole.admin.value:
+                initialize_user_plan(result.inserted_id)
             user = users.find_one({"_id": result.inserted_id})
         except DuplicateKeyError:
             user = users.find_one({"phone_number": payload.phone_number})

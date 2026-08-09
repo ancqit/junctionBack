@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pymongo import ReturnDocument
 
 from .database import products, users
+from .roles import UserRole, get_user_role
 
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
 GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
@@ -105,6 +106,27 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def admin_plan_summary() -> PlanSummary:
+    now = utc_now()
+    return PlanSummary(
+        type=PlanType.premium,
+        status=PlanStatus.active,
+        name="Admin",
+        price_inr=0,
+        max_products=None,
+        profile_only=False,
+        description="Administrator access — not subject to plan limits",
+        started_at=now,
+        ends_at=None,
+        days_remaining=None,
+        is_active=True,
+        trial_used=False,
+        selected_plan_type=None,
+        in_grace_period=False,
+        grace_ends_at=None,
+    )
+
+
 def default_plan_document() -> dict:
     now = utc_now()
     return {
@@ -137,6 +159,9 @@ def initialize_user_plan(user_id: ObjectId) -> dict:
 
 def restore_persisted_plan(user: dict) -> dict:
     """Reload plan from DB, restore a selected paid plan on login, and apply expiry checks."""
+    if get_user_role(user) == UserRole.admin:
+        return user
+
     refreshed = users.find_one({"_id": user["_id"]})
     if refreshed is None:
         return user
@@ -235,6 +260,9 @@ def expire_trial_if_needed(user: dict) -> dict:
 
 
 def build_plan_summary(user: dict) -> PlanSummary:
+    if get_user_role(user) == UserRole.admin:
+        return admin_plan_summary()
+
     user = expire_trial_if_needed(user)
     user = expire_grace_period_if_needed(user)
     plan = user.get("plan") or default_plan_document()
@@ -288,6 +316,9 @@ def build_plan_summary(user: dict) -> PlanSummary:
 
 
 def require_active_plan(user: dict) -> PlanSummary:
+    if get_user_role(user) == UserRole.admin:
+        return admin_plan_summary()
+
     summary = build_plan_summary(user)
     if not summary.is_active:
         if summary.in_grace_period:
@@ -303,12 +334,14 @@ def require_active_plan(user: dict) -> PlanSummary:
 
 
 def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
-    if plan_type == PlanType.free_trial:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be selected manually")
-
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if get_user_role(user) == UserRole.admin:
+        return admin_plan_summary()
+
+    if plan_type == PlanType.free_trial:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be selected manually")
 
     existing_plan = user.get("plan") or {}
     if existing_plan.get("trial_used") and plan_type == PlanType.free_trial:
@@ -338,6 +371,8 @@ def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if get_user_role(user) == UserRole.admin:
+        return admin_plan_summary()
 
     plan = user.get("plan") or {}
     current_type = plan.get("type")
