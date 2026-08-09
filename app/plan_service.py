@@ -172,6 +172,7 @@ def restore_persisted_plan(user: dict) -> dict:
         initialize_user_plan(refreshed["_id"])
         refreshed = users.find_one({"_id": user["_id"]}) or refreshed
         refreshed = expire_trial_if_needed(refreshed)
+        refreshed = expire_paid_plan_if_needed(refreshed)
         return expire_grace_period_if_needed(refreshed)
 
     if plan.get("status") not in {
