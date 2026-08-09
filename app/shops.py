@@ -8,7 +8,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import shops
-from .locations import validate_city_and_locality
+from .locations import ensure_city_and_locality
 from .login import get_current_user
 from .roles import UserRole, get_user_role
 from .utils import parse_object_id

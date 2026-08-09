@@ -63,8 +63,8 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `GET` | `/shops` | Bearer | List shops. Owners see their own; admins see all. |
 | `GET` | `/shops/{shop_id}` | Bearer | Get one shop by ID. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer | Find shop(s) by name (case-insensitive). |
-| `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "..." }`. Phone is taken from logged-in user and **cannot be changed later**. |
-| `PUT` | `/shops/{shop_id}` | Bearer | Update **shop name only**. Body: `{ "name": "..." }`. |
+| `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "..." }` (all required). Phone from logged-in user and **cannot be changed later**. |
+| `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, and/or `locality`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer | Delete a shop. |
 
 ---
@@ -134,7 +134,7 @@ Dropdown data for shop city and locality fields.
 | `GET` | `/locations/cities` | Public | List all available cities. |
 | `GET` | `/locations/localities?city=Mumbai` | Public | List localities for a selected city. |
 
-Seeded with default Indian cities and localities on first request.
+Seeded with default Indian cities and localities on first request. When a user creates a shop with a new city or locality, it is automatically added to these lists.
 
 ---
 

@@ -74,19 +74,26 @@ def list_localities(city: str = Query(..., min_length=1, max_length=80)) -> Loca
     return LocalityListResponse(city=city_name, localities=names)
 
 
-def validate_city_and_locality(city: str, locality: str) -> tuple[str, str]:
+def ensure_city_and_locality(city: str, locality: str) -> tuple[str, str]:
+    """Normalize city/locality and add them to the dropdown lists if they are new."""
     seed_locations_if_empty()
+    cities.create_index("name", unique=True)
+    localities.create_index([("city", 1), ("name", 1)], unique=True)
+
     city_name = _normalize(city)
     locality_name = _normalize(locality)
     if not city_name or not locality_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city and locality are required")
 
-    if cities.find_one({"name": city_name}) is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"City '{city_name}' is not in the allowed list")
-
-    if localities.find_one({"city": city_name, "name": locality_name}) is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Locality '{locality_name}' is not available for city '{city_name}'",
-        )
+    now = datetime.now(timezone.utc)
+    cities.update_one(
+        {"name": city_name},
+        {"$setOnInsert": {"name": city_name, "created_at": now}},
+        upsert=True,
+    )
+    localities.update_one(
+        {"city": city_name, "name": locality_name},
+        {"$setOnInsert": {"city": city_name, "name": locality_name, "created_at": now}},
+        upsert=True,
+    )
     return city_name, locality_name
