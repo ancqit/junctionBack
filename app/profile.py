@@ -18,6 +18,8 @@ class Profile(BaseModel):
     display_name: str
     bio: str | None
     avatar_url: str | None
+    digilocker_verified: bool = False
+    digilocker_name: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -39,7 +41,18 @@ class ProfileUpdate(BaseModel):
 
 
 def serialize_profile(user: dict) -> Profile:
-    return Profile(id=str(user["_id"]), email=user.get("email"), phone_number=user.get("phone_number"), display_name=user["display_name"], bio=user.get("bio"), avatar_url=user.get("avatar_url"), created_at=user["created_at"], updated_at=user["updated_at"])
+    return Profile(
+        id=str(user["_id"]),
+        email=user.get("email"),
+        phone_number=user.get("phone_number"),
+        display_name=user["display_name"],
+        bio=user.get("bio"),
+        avatar_url=user.get("avatar_url"),
+        digilocker_verified=bool(user.get("digilocker_verified", False)),
+        digilocker_name=user.get("digilocker_name"),
+        created_at=user["created_at"],
+        updated_at=user["updated_at"],
+    )
 
 
 @router.get("", response_model=Profile)
