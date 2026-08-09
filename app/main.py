@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import items
+from .admin import router as admin_router
 from .digilocker import router as digilocker_router
 from .employees import router as employees_router
 from .login import router as login_router
@@ -18,6 +19,7 @@ from .plans import router as plans_router
 from .products import router as products_router
 from .profile import router as profile_router
 from .queries import router as queries_router
+from .shops import router as shops_router
 
 app = FastAPI(
     title="Junction Backend",
@@ -48,6 +50,8 @@ app.include_router(employees_router)
 app.include_router(orders_router)
 app.include_router(queries_router)
 app.include_router(plans_router)
+app.include_router(admin_router)
+app.include_router(shops_router)
 
 
 class ItemCreate(BaseModel):

@@ -17,6 +17,8 @@ from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
+from .role_keeper import resolve_role_from_keeper
+from .roles import DEFAULT_USER_ROLE, UserRole, get_user_role
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -48,6 +50,7 @@ class UserSummary(BaseModel):
     email: EmailStr | None = None
     phone_number: str | None = None
     display_name: str
+    role: UserRole
 
 
 class TokenResponse(BaseModel):
@@ -55,6 +58,26 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: UserSummary
     plan: PlanSummary
+    role: UserRole
+
+
+class RoleInfo(BaseModel):
+    value: UserRole
+    label: str
+    description: str
+
+
+class AuthMeResponse(BaseModel):
+    user: UserSummary
+    role: UserRole
+    plan: PlanSummary
+
+
+AVAILABLE_ROLES = [
+    RoleInfo(value=UserRole.admin, label="Admin", description="Platform administrator with full user management access"),
+    RoleInfo(value=UserRole.owner, label="Owner", description="Store owner with full business access"),
+    RoleInfo(value=UserRole.viewer, label="Viewer", description="Read-only access to business data"),
+]
 
 
 class OtpRequest(BaseModel):
@@ -107,7 +130,37 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def user_summary(document: dict) -> UserSummary:
-    return UserSummary(id=str(document["_id"]), email=document.get("email"), phone_number=document.get("phone_number"), display_name=document["display_name"])
+    return UserSummary(
+        id=str(document["_id"]),
+        email=document.get("email"),
+        phone_number=document.get("phone_number"),
+        display_name=document["display_name"],
+        role=get_user_role(document),
+    )
+
+
+def resolve_role_for_user(email: str | None = None, phone_number: str | None = None) -> str:
+    return resolve_role_from_keeper(email=email, phone_number=phone_number)
+
+
+def sync_role_from_keeper(user: dict) -> dict:
+    role = resolve_role_for_user(email=user.get("email"), phone_number=user.get("phone_number"))
+    if user.get("role") == role:
+        return user
+    updated = users.find_one_and_update(
+        {"_id": user["_id"]},
+        {"$set": {"role": role, "updated_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or user
+
+
+def ensure_account_is_active(user: dict) -> None:
+    if user.get("account_status") == "deactivated":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been deactivated by an administrator.",
+        )
 
 
 def require_gcp_otp_configuration() -> None:
@@ -124,16 +177,21 @@ def gcp_error(response: httpx.Response) -> HTTPException:
 
 
 def token_response(user: dict) -> TokenResponse:
-    if user.get("plan") is None:
-        initialize_user_plan(user["_id"])
-        refreshed = users.find_one({"_id": user["_id"]})
-        if refreshed is not None:
-            user = refreshed
-    user = restore_persisted_plan(user)
+    ensure_account_is_active(user)
+    user = sync_role_from_keeper(user)
+    role = get_user_role(user)
+    if role != UserRole.admin:
+        if user.get("plan") is None:
+            initialize_user_plan(user["_id"])
+            refreshed = users.find_one({"_id": user["_id"]})
+            if refreshed is not None:
+                user = refreshed
+        user = restore_persisted_plan(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
         plan=build_plan_summary(user),
+        role=role,
     )
 
 
@@ -153,7 +211,23 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     user = users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise error
+    ensure_account_is_active(user)
     return restore_persisted_plan(user)
+
+
+@router.get("/roles", response_model=list[RoleInfo])
+def list_roles() -> list[RoleInfo]:
+    return AVAILABLE_ROLES
+
+
+@router.get("/me", response_model=AuthMeResponse)
+def read_current_session(current_user: Annotated[dict, Depends(get_current_user)]) -> AuthMeResponse:
+    role = get_user_role(current_user)
+    return AuthMeResponse(
+        user=user_summary(current_user),
+        role=role,
+        plan=build_plan_summary(current_user),
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -163,13 +237,24 @@ def register(payload: RegisterRequest) -> TokenResponse:
     if users.find_one({"email": email}) is not None:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     now = datetime.now(timezone.utc)
-    document = {"email": email, "password_hash": hash_password(payload.password), "display_name": payload.display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+    document = {
+        "email": email,
+        "password_hash": hash_password(payload.password),
+        "display_name": payload.display_name,
+        "role": resolve_role_for_user(email=email),
+        "account_status": "active",
+        "bio": None,
+        "avatar_url": None,
+        "created_at": now,
+        "updated_at": now,
+    }
     try:
         result = users.insert_one(document)
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     document["_id"] = result.inserted_id
-    initialize_user_plan(result.inserted_id)
+    if resolve_role_for_user(email=email) != UserRole.admin.value:
+        initialize_user_plan(result.inserted_id)
     document = users.find_one({"_id": result.inserted_id})
     return token_response(document)
 
@@ -246,10 +331,22 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
     display_name = request["display_name"].strip()
     user = users.find_one({"phone_number": payload.phone_number})
     if user is None:
-        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+        document = {
+            "phone_number": payload.phone_number,
+            "mobile_verified": True,
+            "gcp_identity_id": gcp_user_id,
+            "display_name": display_name,
+            "role": resolve_role_for_user(phone_number=payload.phone_number),
+            "account_status": "active",
+            "bio": None,
+            "avatar_url": None,
+            "created_at": now,
+            "updated_at": now,
+        }
         try:
             result = users.insert_one(document)
-            initialize_user_plan(result.inserted_id)
+            if resolve_role_for_user(phone_number=payload.phone_number) != UserRole.admin.value:
+                initialize_user_plan(result.inserted_id)
             user = users.find_one({"_id": result.inserted_id})
         except DuplicateKeyError:
             user = users.find_one({"phone_number": payload.phone_number})
