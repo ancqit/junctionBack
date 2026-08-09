@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 from .database import products, users
 
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
+GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
 
 
 class PlanType(str, Enum):
@@ -21,6 +22,7 @@ class PlanType(str, Enum):
 
 class PlanStatus(str, Enum):
     active = "active"
+    grace_period = "grace_period"
     expired = "expired"
     cancelled = "cancelled"
 
@@ -75,6 +77,8 @@ class PlanSummary(BaseModel):
     is_active: bool
     trial_used: bool
     selected_plan_type: PlanType | None = None
+    in_grace_period: bool = False
+    grace_ends_at: datetime | None = None
 
 
 class PlanOption(BaseModel):
@@ -131,7 +135,7 @@ def initialize_user_plan(user_id: ObjectId) -> dict:
 
 
 def restore_persisted_plan(user: dict) -> dict:
-    """Reload plan from DB and re-apply a previously selected paid plan on login."""
+    """Reload plan from DB and apply trial or grace-period expiry checks."""
     refreshed = users.find_one({"_id": user["_id"]})
     if refreshed is None:
         return user
@@ -140,31 +144,37 @@ def restore_persisted_plan(user: dict) -> dict:
     if plan is None:
         initialize_user_plan(refreshed["_id"])
         refreshed = users.find_one({"_id": user["_id"]}) or refreshed
-        return expire_trial_if_needed(refreshed)
 
-    selected_plan_type = plan.get("selected_plan_type")
-    if selected_plan_type is None and is_paid_plan(plan.get("type")):
-        selected_plan_type = plan.get("type")
+    refreshed = expire_trial_if_needed(refreshed)
+    return expire_grace_period_if_needed(refreshed)
 
-    if is_paid_plan(selected_plan_type):
-        now = utc_now()
+
+def expire_grace_period_if_needed(user: dict) -> dict:
+    plan = user.get("plan")
+    if not plan or plan.get("status") != PlanStatus.grace_period.value:
+        return user
+
+    grace_ends_at = plan.get("grace_ends_at")
+    if grace_ends_at is None:
+        return user
+
+    if grace_ends_at.tzinfo is None:
+        grace_ends_at = grace_ends_at.replace(tzinfo=timezone.utc)
+
+    if utc_now() >= grace_ends_at:
         updated = users.find_one_and_update(
-            {"_id": refreshed["_id"]},
+            {"_id": user["_id"], "plan.status": PlanStatus.grace_period.value},
             {
                 "$set": {
-                    "plan.type": selected_plan_type,
-                    "plan.selected_plan_type": selected_plan_type,
-                    "plan.status": PlanStatus.active.value,
-                    "plan.ends_at": None,
-                    "plan.restored_at": now,
-                    "updated_at": now,
+                    "plan.status": PlanStatus.expired.value,
+                    "plan.closed_at": utc_now(),
+                    "updated_at": utc_now(),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
-        return updated or refreshed
-
-    return expire_trial_if_needed(refreshed)
+        return updated or user
+    return user
 
 
 def expire_trial_if_needed(user: dict) -> dict:
@@ -200,6 +210,7 @@ def expire_trial_if_needed(user: dict) -> dict:
 
 def build_plan_summary(user: dict) -> PlanSummary:
     user = expire_trial_if_needed(user)
+    user = expire_grace_period_if_needed(user)
     plan = user.get("plan") or default_plan_document()
     plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
     selected_plan_type = plan.get("selected_plan_type")
@@ -211,16 +222,21 @@ def build_plan_summary(user: dict) -> PlanSummary:
     status_value = PlanStatus(plan.get("status", PlanStatus.active.value))
     started_at = plan.get("started_at", utc_now())
     ends_at = plan.get("ends_at")
+    grace_ends_at = plan.get("grace_ends_at")
+    in_grace_period = status_value == PlanStatus.grace_period
 
     days_remaining = None
-    is_active = status_value == PlanStatus.active
-    if ends_at is not None:
-        if ends_at.tzinfo is None:
-            ends_at = ends_at.replace(tzinfo=timezone.utc)
-        remaining = ends_at - utc_now()
+    is_active = status_value in {PlanStatus.active, PlanStatus.grace_period}
+
+    countdown_end = grace_ends_at if in_grace_period else ends_at
+    if countdown_end is not None:
+        if countdown_end.tzinfo is None:
+            countdown_end = countdown_end.replace(tzinfo=timezone.utc)
+        remaining = countdown_end - utc_now()
         days_remaining = max(0, remaining.days + (1 if remaining.seconds > 0 else 0))
-        if plan_type == PlanType.free_trial and utc_now() >= ends_at:
-            is_active = False
+        if utc_now() >= countdown_end:
+            if in_grace_period or plan_type == PlanType.free_trial:
+                is_active = False
 
     return PlanSummary(
         type=plan_type,
@@ -236,15 +252,22 @@ def build_plan_summary(user: dict) -> PlanSummary:
         is_active=is_active,
         trial_used=bool(plan.get("trial_used", False)),
         selected_plan_type=selected_plan_type,
+        in_grace_period=in_grace_period,
+        grace_ends_at=grace_ends_at,
     )
 
 
 def require_active_plan(user: dict) -> PlanSummary:
     summary = build_plan_summary(user)
     if not summary.is_active:
+        if summary.in_grace_period:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your grace period has ended. Please renew your plan to continue.",
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your free trial has ended. Please choose a plan to continue.",
+            detail="Your plan has expired. Please choose a plan to continue.",
         )
     return summary
 
@@ -267,6 +290,8 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         "status": PlanStatus.active.value,
         "started_at": existing_plan.get("started_at", now),
         "ends_at": None,
+        "grace_ends_at": None,
+        "grace_started_at": None,
         "trial_used": bool(existing_plan.get("trial_used", False)),
         "selected_plan_type": plan_type.value,
         "selected_at": now,
@@ -274,6 +299,40 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
     updated = users.find_one_and_update(
         {"_id": user_id},
         {"$set": {"plan": plan_document, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return build_plan_summary(updated)
+
+
+def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
+    user = users.find_one({"_id": user_id})
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    plan = user.get("plan") or {}
+    current_type = plan.get("type")
+    if not is_paid_plan(current_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only Starter, Growth, or Premium plans can enter a grace period",
+        )
+    if plan.get("status") == PlanStatus.grace_period.value:
+        return build_plan_summary(user)
+
+    now = utc_now()
+    grace_ends_at = now + timedelta(days=GRACE_DAYS)
+    updated = users.find_one_and_update(
+        {"_id": user_id},
+        {
+            "$set": {
+                "plan.status": PlanStatus.grace_period.value,
+                "plan.selected_plan_type": current_type,
+                "plan.grace_started_at": now,
+                "plan.grace_ends_at": grace_ends_at,
+                "plan.cancelled_at": now,
+                "updated_at": now,
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
     return build_plan_summary(updated)

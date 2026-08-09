@@ -4,7 +4,15 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from .login import get_current_user
-from .plan_service import PlanOption, PlanSummary, PlanType, build_plan_summary, list_plan_options, select_plan_for_user
+from .plan_service import (
+    PlanOption,
+    PlanSummary,
+    PlanType,
+    build_plan_summary,
+    cancel_plan_for_user,
+    list_plan_options,
+    select_plan_for_user,
+)
 
 router = APIRouter(prefix="/plans", tags=["plans"])
 
@@ -35,3 +43,8 @@ def get_my_plan(current_user: Annotated[dict, Depends(get_current_user)]) -> Pla
 @router.post("/select", response_model=PlanSummary)
 def select_plan(payload: SelectPlanRequest, current_user: Annotated[dict, Depends(get_current_user)]) -> PlanSummary:
     return select_plan_for_user(current_user["_id"], payload.plan_type)
+
+
+@router.post("/cancel", response_model=PlanSummary)
+def cancel_plan(current_user: Annotated[dict, Depends(get_current_user)]) -> PlanSummary:
+    return cancel_plan_for_user(current_user["_id"])
