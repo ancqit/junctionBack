@@ -16,6 +16,7 @@ from .login import router as login_router
 from .orders import router as orders_router
 from .products import router as products_router
 from .profile import router as profile_router
+from .queries import router as queries_router
 
 app = FastAPI(
     title="Junction Backend",
@@ -44,6 +45,7 @@ app.include_router(profile_router)
 app.include_router(products_router)
 app.include_router(employees_router)
 app.include_router(orders_router)
+app.include_router(queries_router)
 
 
 class ItemCreate(BaseModel):
