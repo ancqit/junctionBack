@@ -150,6 +150,14 @@ Seeded with default Indian cities and localities on first request. When a user c
 | `POST` | `/plans/apply` | Bearer | Apply for a plan. Body: `{ "plan_type": "premium", "shop_id": "..." }`. Uses shop name, city, and locality from the shop record. |
 | `GET` | `/plans/applications/me` | Bearer | Get your pending plan application, if any. |
 
+**Waitlist aliases** (same behavior as plan apply endpoints):
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/waitlist/preview` | Bearer | Preview waitlist entry / plan switch message. |
+| `POST` | `/waitlist` | Bearer | Join the waitlist (apply for a plan). |
+| `GET` | `/waitlist/me` | Bearer | Get your pending waitlist entry. |
+
 **Lifecycle:**
 1. **Free trial** (15 days, `owner`) → trial ends → role becomes `viewer` immediately
 2. **Starter / Growth / Premium** expires or is cancelled → **grace period** (15 days, still `owner`) → grace ends → role becomes `viewer`
@@ -183,6 +191,7 @@ All endpoints require **admin** role.
 | `DELETE` | `/admin/users` | Bulk-delete **viewers only**. Body: `{ "user_ids": ["id1", "id2"] }`. Owners and admins are protected and returned in `protected_owner_ids` / `protected_admin_ids`. |
 | `DELETE` | `/admin/viewers` | Alias for `DELETE /admin/users`. |
 | `GET` | `/admin/plan-applications` | List all plan applications (shop name, identity, location, requested plan, switch status). |
+| `GET` | `/admin/waitlist` | Alias for `/admin/plan-applications`. |
 
 **Admin access in production (Render):**
 ```
