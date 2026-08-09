@@ -144,7 +144,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     shops.create_index([("owner_user_id", 1), ("name", 1)], unique=True)
     shops.create_index("phone_number", unique=True)
 
-    city, locality = validate_city_and_locality(payload.city, payload.locality)
+    city, locality = ensure_city_and_locality(payload.city, payload.locality)
     phone_number = get_user_phone_number(current_user)
     now = datetime.now(timezone.utc)
     document = {
