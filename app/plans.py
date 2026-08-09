@@ -10,29 +10,24 @@ from .plan_service import (
     PlanType,
     build_plan_summary,
     cancel_plan_for_user,
-    list_plan_options,
+    list_all_plans,
     select_plan_for_user,
 )
 
 router = APIRouter(prefix="/plans", tags=["plans"])
 
 
+class PlansListResponse(BaseModel):
+    plans: list[PlanOption]
+
+
 class SelectPlanRequest(BaseModel):
     plan_type: PlanType
 
 
-@router.get("", response_model=list[PlanOption])
-def list_plans() -> list[PlanOption]:
-    trial_plan = PlanOption(
-        type=PlanType.free_trial,
-        name="Free Trial",
-        price_inr=0,
-        max_products=150,
-        profile_only=False,
-        description="Try all features free for 15 days",
-        duration_days=15,
-    )
-    return [trial_plan, *list_plan_options()]
+@router.get("", response_model=PlansListResponse)
+def list_plans() -> PlansListResponse:
+    return PlansListResponse(plans=list_all_plans())
 
 
 @router.get("/me", response_model=PlanSummary)
