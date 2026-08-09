@@ -62,6 +62,25 @@ class TokenResponse(BaseModel):
     role: UserRole
 
 
+class RoleInfo(BaseModel):
+    value: UserRole
+    label: str
+    description: str
+
+
+class AuthMeResponse(BaseModel):
+    user: UserSummary
+    role: UserRole
+    plan: PlanSummary
+
+
+AVAILABLE_ROLES = [
+    RoleInfo(value=UserRole.admin, label="Admin", description="Platform administrator with full user management access"),
+    RoleInfo(value=UserRole.owner, label="Owner", description="Store owner with full business access"),
+    RoleInfo(value=UserRole.viewer, label="Viewer", description="Read-only access to business data"),
+]
+
+
 class OtpRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     phone_number: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
@@ -185,6 +204,21 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
         raise error
     ensure_account_is_active(user)
     return restore_persisted_plan(user)
+
+
+@router.get("/roles", response_model=list[RoleInfo])
+def list_roles() -> list[RoleInfo]:
+    return AVAILABLE_ROLES
+
+
+@router.get("/me", response_model=AuthMeResponse)
+def read_current_session(current_user: Annotated[dict, Depends(get_current_user)]) -> AuthMeResponse:
+    role = get_user_role(current_user)
+    return AuthMeResponse(
+        user=user_summary(current_user),
+        role=role,
+        plan=build_plan_summary(current_user),
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
