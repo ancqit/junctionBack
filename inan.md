@@ -29,6 +29,8 @@ Authorization: Bearer <access_token>
 
 **Login response includes:** `access_token`, `user`, `plan`, `role`.
 
+`user.plan` is a short plan slug for onboarding: `"free_trial"` while on an active free trial, `"starter"` after the user selects Starter via `POST /plans/select`, or `""` otherwise (Growth, Premium, expired, or not yet selected).
+
 **Role resolution on every login:**
 1. Check admin list (`ADMIN_LIST_JSON`, `ADMIN_EMAIL`, `ADMIN_PHONE`, or `admin.json`)
 2. Else check MongoDB role keeper (owner/viewer mappings)

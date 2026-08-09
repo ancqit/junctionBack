@@ -305,6 +305,25 @@ def expire_trial_if_needed(user: dict) -> dict:
     return user
 
 
+def resolve_login_plan_string(user: dict) -> str:
+    """Return selected plan slug for login, or empty string when not on free trial/starter."""
+    if get_user_role(user) == UserRole.admin:
+        return ""
+
+    plan = user.get("plan") or {}
+    plan_type = plan.get("type")
+    selected_plan_type = plan.get("selected_plan_type")
+    status = plan.get("status", PlanStatus.active.value)
+
+    if plan_type == PlanType.free_trial.value and status == PlanStatus.active.value:
+        return PlanType.free_trial.value
+
+    if plan_type == PlanType.starter.value and selected_plan_type == PlanType.starter.value:
+        return PlanType.starter.value
+
+    return ""
+
+
 def build_plan_summary(user: dict) -> PlanSummary:
     if get_user_role(user) == UserRole.admin:
         return admin_plan_summary()

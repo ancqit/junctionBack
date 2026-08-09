@@ -16,7 +16,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import otp_requests, users
-from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, restore_persisted_plan
+from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, resolve_login_plan_string, restore_persisted_plan
 from .role_keeper import resolve_role_from_keeper
 from .roles import DEFAULT_USER_ROLE, UserRole, get_user_role
 
@@ -51,6 +51,7 @@ class UserSummary(BaseModel):
     phone_number: str | None = None
     display_name: str
     role: UserRole
+    plan: str = ""
 
 
 class TokenResponse(BaseModel):
@@ -136,6 +137,7 @@ def user_summary(document: dict) -> UserSummary:
         phone_number=document.get("phone_number"),
         display_name=document["display_name"],
         role=get_user_role(document),
+        plan=resolve_login_plan_string(document),
     )
 
 
