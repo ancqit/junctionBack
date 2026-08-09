@@ -243,9 +243,10 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
 
     otp_requests.delete_one({"_id": request["_id"]})
     users.create_index("phone_number", unique=True, sparse=True)
+    display_name = request["display_name"].strip()
     user = users.find_one({"phone_number": payload.phone_number})
     if user is None:
-        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": request["display_name"], "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
+        document = {"phone_number": payload.phone_number, "mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "bio": None, "avatar_url": None, "created_at": now, "updated_at": now}
         try:
             result = users.insert_one(document)
             initialize_user_plan(result.inserted_id)
@@ -254,7 +255,7 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
             user = users.find_one({"phone_number": payload.phone_number})
     user = users.find_one_and_update(
         {"_id": user["_id"]},
-        {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "updated_at": now}},
+        {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
     return token_response(user)
