@@ -31,8 +31,39 @@ def _clean_admin_mappings(raw: object) -> dict[str, str]:
     return cleaned
 
 
+def _load_env_admin_mappings() -> dict[str, str]:
+    mappings: dict[str, str] = {}
+
+    admin_list_json = os.getenv("ADMIN_LIST_JSON", "").strip()
+    if admin_list_json:
+        try:
+            mappings.update(_clean_admin_mappings(json.loads(admin_list_json)))
+        except json.JSONDecodeError:
+            pass
+
+    admin_email = os.getenv("ADMIN_EMAIL", "").lower().strip()
+    if admin_email:
+        mappings[admin_email] = "admin"
+
+    admin_phone = os.getenv("ADMIN_PHONE", "").strip()
+    if admin_phone:
+        mappings[admin_phone] = "admin"
+
+    return mappings
+
+
+def _load_file_admin_mappings(path: Path) -> tuple[dict[str, str], float | None]:
+    if not path.exists():
+        return {}, None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, path.stat().st_mtime
+    return _clean_admin_mappings(raw), path.stat().st_mtime
+
+
 def load_admin_registry(*, force: bool = False) -> dict[str, str]:
-    """Load admin phone/email mappings from admin.json, with in-memory caching."""
+    """Load admin phone/email mappings from env vars and optional admin.json."""
     global _cached_admins, _cached_mtime, _loaded_at
 
     path = Path(ADMIN_LIST_PATH)
@@ -44,17 +75,9 @@ def load_admin_registry(*, force: bool = False) -> dict[str, str]:
         if _cached_mtime == mtime:
             return _cached_admins
 
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            mappings = {}
-        else:
-            mappings = _clean_admin_mappings(raw)
-        mtime = path.stat().st_mtime
-    else:
-        mappings = {}
-        mtime = None
+    mappings = _load_env_admin_mappings()
+    file_mappings, mtime = _load_file_admin_mappings(path)
+    mappings.update(file_mappings)
 
     _cached_admins = mappings
     _cached_mtime = mtime
@@ -63,7 +86,7 @@ def load_admin_registry(*, force: bool = False) -> dict[str, str]:
 
 
 def refresh_admin_registry() -> dict[str, str]:
-    """Force reload admin.json from disk."""
+    """Force reload admin mappings from env vars and admin.json."""
     return load_admin_registry(force=True)
 
 
@@ -83,12 +106,5 @@ def is_admin_user(*, email: str | None = None, phone_number: str | None = None) 
         normalized_email = _normalize_email(email)
         if normalized_email in mappings:
             return True
-
-    admin_email = os.getenv("ADMIN_EMAIL", "").lower().strip()
-    admin_phone = os.getenv("ADMIN_PHONE", "").strip()
-    if admin_email and email and _normalize_email(email) == admin_email:
-        return True
-    if admin_phone and phone_number and _normalize_phone(phone_number) == admin_phone:
-        return True
 
     return False
