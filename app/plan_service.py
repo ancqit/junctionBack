@@ -103,6 +103,10 @@ def list_plan_options() -> list[PlanOption]:
     return [plan_option(PlanType(plan_type)) for plan_type in PLAN_CATALOG if plan_type != PlanType.free_trial.value]
 
 
+def list_all_plans() -> list[PlanOption]:
+    return [plan_option(PlanType(plan_type)) for plan_type in PLAN_CATALOG]
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
