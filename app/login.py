@@ -144,6 +144,17 @@ def resolve_role_for_user(email: str | None = None, phone_number: str | None = N
 
 
 def sync_role_from_keeper(user: dict) -> dict:
+    plan = user.get("plan") or {}
+    if plan.get("viewing_applied"):
+        if user.get("role") != UserRole.viewer.value:
+            updated = users.find_one_and_update(
+                {"_id": user["_id"]},
+                {"$set": {"role": UserRole.viewer.value, "updated_at": datetime.now(timezone.utc)}},
+                return_document=ReturnDocument.AFTER,
+            )
+            return updated or user
+        return user
+
     role = resolve_role_for_user(email=user.get("email"), phone_number=user.get("phone_number"))
     if user.get("role") == role:
         return user
@@ -178,7 +189,6 @@ def gcp_error(response: httpx.Response) -> HTTPException:
 
 def token_response(user: dict) -> TokenResponse:
     ensure_account_is_active(user)
-    user = sync_role_from_keeper(user)
     role = get_user_role(user)
     if role != UserRole.admin:
         if user.get("plan") is None:
@@ -187,6 +197,8 @@ def token_response(user: dict) -> TokenResponse:
             if refreshed is not None:
                 user = refreshed
         user = restore_persisted_plan(user)
+    user = sync_role_from_keeper(user)
+    role = get_user_role(user)
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
@@ -212,7 +224,8 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     if user is None:
         raise error
     ensure_account_is_active(user)
-    return restore_persisted_plan(user)
+    user = restore_persisted_plan(user)
+    return sync_role_from_keeper(user)
 
 
 @router.get("/roles", response_model=list[RoleInfo])

@@ -8,6 +8,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import shops
+from .locations import ensure_city_and_locality
 from .login import get_current_user
 from .roles import UserRole, get_user_role
 from .utils import parse_object_id
@@ -15,27 +16,47 @@ from .utils import parse_object_id
 router = APIRouter(prefix="/shops", tags=["shops"])
 
 
+def _strip_required(value: str, field_name: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError(f"{field_name} must not be blank")
+    return value
+
+
 class ShopCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
+    city: str = Field(min_length=1, max_length=80)
+    locality: str = Field(min_length=1, max_length=120)
 
     @field_validator("name")
     @classmethod
     def strip_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("name must not be blank")
-        return value
+        return _strip_required(value, "name")
+
+    @field_validator("city")
+    @classmethod
+    def strip_city(cls, value: str) -> str:
+        return _strip_required(value, "city")
+
+    @field_validator("locality")
+    @classmethod
+    def strip_locality(cls, value: str) -> str:
+        return _strip_required(value, "locality")
 
 
 class ShopUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=160)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    city: str | None = Field(default=None, min_length=1, max_length=80)
+    locality: str | None = Field(default=None, min_length=1, max_length=120)
 
-    @field_validator("name")
+    @field_validator("name", "city", "locality")
     @classmethod
-    def strip_name(cls, value: str) -> str:
+    def strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         value = value.strip()
         if not value:
-            raise ValueError("name must not be blank")
+            raise ValueError("must not be blank")
         return value
 
 
@@ -44,6 +65,8 @@ class Shop(BaseModel):
 
     id: str
     name: str
+    city: str
+    locality: str
     phone_number: str
     owner_user_id: str
     created_at: datetime
@@ -54,6 +77,8 @@ def serialize_shop(document: dict) -> Shop:
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
+        city=document.get("city", ""),
+        locality=document.get("locality", ""),
         phone_number=document["phone_number"],
         owner_user_id=document["owner_user_id"],
         created_at=document["created_at"],
@@ -119,10 +144,13 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     shops.create_index([("owner_user_id", 1), ("name", 1)], unique=True)
     shops.create_index("phone_number", unique=True)
 
+    city, locality = ensure_city_and_locality(payload.city, payload.locality)
     phone_number = get_user_phone_number(current_user)
     now = datetime.now(timezone.utc)
     document = {
         "name": payload.name,
+        "city": city,
+        "locality": locality,
         "phone_number": phone_number,
         "owner_user_id": str(current_user["_id"]),
         "created_at": now,
@@ -140,7 +168,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
 
 
 @router.put("/{shop_id}", response_model=Shop)
-def update_shop_name(
+def update_shop(
     shop_id: str,
     payload: ShopUpdate,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -150,10 +178,22 @@ def update_shop_name(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     ensure_shop_access(current_user, existing)
 
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide at least one field to update")
+
+    city = changes.get("city", existing.get("city", ""))
+    locality = changes.get("locality", existing.get("locality", ""))
+    if "city" in changes or "locality" in changes:
+        city, locality = ensure_city_and_locality(city, locality)
+        changes["city"] = city
+        changes["locality"] = locality
+
+    changes["updated_at"] = datetime.now(timezone.utc)
     try:
         document = shops.find_one_and_update(
             {"_id": existing["_id"]},
-            {"$set": {"name": payload.name, "updated_at": datetime.now(timezone.utc)}},
+            {"$set": changes},
             return_document=ReturnDocument.AFTER,
         )
     except DuplicateKeyError as exc:

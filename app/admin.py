@@ -12,10 +12,19 @@ from .admin_registry import (
     refresh_admin_registry,
 )
 from .login import get_current_user
-from .plan_service import PlanSummary, PlanStatus, PlanType, admin_activate_user_plan, admin_deactivate_user_plan, build_plan_summary
+from .plan_service import (
+    PlanSummary,
+    PlanStatus,
+    PlanType,
+    admin_activate_user_plan,
+    admin_deactivate_user_plan,
+    admin_delete_users,
+    build_plan_summary,
+)
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
 from .roles import UserRole, get_user_role
-from .database import users
+from .plan_applications import PlanApplication, serialize_application
+from .database import plan_applications, users
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -43,6 +52,31 @@ class AdminUserRecord(BaseModel):
     days_remaining: int | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ViewerRecord(BaseModel):
+    id: str
+    display_name: str
+    email: EmailStr | None = None
+    phone_number: str | None = None
+    account_status: str
+    plan_type: PlanType
+    plan_status: PlanStatus
+    days_remaining: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BulkDeleteUsersRequest(BaseModel):
+    user_ids: list[str]
+
+
+class BulkDeleteUsersResponse(BaseModel):
+    deleted_count: int
+    deleted_ids: list[str]
+    not_found_ids: list[str]
+    protected_owner_ids: list[str]
+    protected_admin_ids: list[str]
 
 
 class UpdateUserRoleRequest(BaseModel):
@@ -79,6 +113,22 @@ def serialize_admin_user(user: dict) -> AdminUserRecord:
         plan_name=plan.name,
         selected_plan_type=plan.selected_plan_type,
         in_grace_period=plan.in_grace_period,
+        days_remaining=plan.days_remaining,
+        created_at=user["created_at"],
+        updated_at=user["updated_at"],
+    )
+
+
+def serialize_viewer(user: dict) -> ViewerRecord:
+    plan = build_plan_summary(user)
+    return ViewerRecord(
+        id=str(user["_id"]),
+        display_name=user.get("display_name", ""),
+        email=user.get("email"),
+        phone_number=user.get("phone_number"),
+        account_status=user.get("account_status", "active"),
+        plan_type=plan.type,
+        plan_status=plan.status,
         days_remaining=plan.days_remaining,
         created_at=user["created_at"],
         updated_at=user["updated_at"],
@@ -131,6 +181,46 @@ def update_user_role(
     return serialize_admin_user(user)
 
 
+@router.get("/viewers", response_model=list[ViewerRecord])
+def list_viewers(_: Annotated[dict, Depends(require_admin)]) -> list[ViewerRecord]:
+    documents = users.find({"role": UserRole.viewer.value}).sort("created_at", -1)
+    return [serialize_viewer(document) for document in documents]
+
+
+@router.delete("/users", response_model=BulkDeleteUsersResponse)
+def delete_users(
+    payload: BulkDeleteUsersRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> BulkDeleteUsersResponse:
+    """Delete viewer accounts only. Shop owners and admins can never be deleted."""
+    if not payload.user_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide at least one user_id")
+    object_ids = [parse_object_id(user_id, "User") for user_id in payload.user_ids]
+    result = admin_delete_users(object_ids)
+    return BulkDeleteUsersResponse(**result)
+
+
+@router.delete("/viewers", response_model=BulkDeleteUsersResponse)
+def delete_viewers(
+    payload: BulkDeleteUsersRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> BulkDeleteUsersResponse:
+    """Alias for DELETE /admin/users — bulk-delete viewer accounts only."""
+    return delete_users(payload, _)
+
+
+@router.get("/plan-applications", response_model=list[PlanApplication])
+def list_plan_applications(_: Annotated[dict, Depends(require_admin)]) -> list[PlanApplication]:
+    documents = plan_applications.find().sort("created_at", -1)
+    return [serialize_application(document) for document in documents]
+
+
+@router.get("/waitlist", response_model=list[PlanApplication])
+def list_waitlist(_: Annotated[dict, Depends(require_admin)]) -> list[PlanApplication]:
+    """Alias for GET /admin/plan-applications."""
+    return list_plan_applications(_)
+
+
 @router.get("/role-keeper", response_model=RoleKeeperResponse)
 def get_role_keeper(_: Annotated[dict, Depends(require_admin)]) -> RoleKeeperResponse:
     document = get_role_keeper_document()
@@ -160,26 +250,6 @@ def update_role_keeper(
     return RoleKeeperResponse(
         mappings={key: UserRole(value) for key, value in mappings.items()},
         updated_at=document["updated_at"],
-    )
-
-
-@router.get("/admins", response_model=AdminRegistryResponse)
-def get_admin_registry(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
-    mappings = load_admin_registry()
-    return AdminRegistryResponse(
-        mappings=mappings,
-        loaded_at=get_admin_registry_loaded_at(),
-        file_path=ADMIN_LIST_PATH,
-    )
-
-
-@router.post("/admins/refresh", response_model=AdminRegistryResponse)
-def refresh_admin_registry_endpoint(_: Annotated[dict, Depends(require_admin)]) -> AdminRegistryResponse:
-    mappings = refresh_admin_registry()
-    return AdminRegistryResponse(
-        mappings=mappings,
-        loaded_at=get_admin_registry_loaded_at(),
-        file_path=ADMIN_LIST_PATH,
     )
 
 
