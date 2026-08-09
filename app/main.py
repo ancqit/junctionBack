@@ -13,6 +13,7 @@ from .database import items
 from .digilocker import router as digilocker_router
 from .employees import router as employees_router
 from .login import router as login_router
+from .orders import router as orders_router
 from .products import router as products_router
 from .profile import router as profile_router
 
@@ -42,6 +43,7 @@ app.include_router(digilocker_router)
 app.include_router(profile_router)
 app.include_router(products_router)
 app.include_router(employees_router)
+app.include_router(orders_router)
 
 
 class ItemCreate(BaseModel):
