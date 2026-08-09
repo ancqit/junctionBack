@@ -136,7 +136,7 @@ def initialize_user_plan(user_id: ObjectId) -> dict:
 
 
 def restore_persisted_plan(user: dict) -> dict:
-    """Reload plan from DB and apply trial or grace-period expiry checks."""
+    """Reload plan from DB, restore a selected paid plan on login, and apply expiry checks."""
     refreshed = users.find_one({"_id": user["_id"]})
     if refreshed is None:
         return user
@@ -145,6 +145,31 @@ def restore_persisted_plan(user: dict) -> dict:
     if plan is None:
         initialize_user_plan(refreshed["_id"])
         refreshed = users.find_one({"_id": user["_id"]}) or refreshed
+        refreshed = expire_trial_if_needed(refreshed)
+        return expire_grace_period_if_needed(refreshed)
+
+    if plan.get("status") not in {PlanStatus.grace_period.value, PlanStatus.deactivated.value}:
+        selected_plan_type = plan.get("selected_plan_type")
+        if selected_plan_type is None and is_paid_plan(plan.get("type")):
+            selected_plan_type = plan.get("type")
+
+        if is_paid_plan(selected_plan_type):
+            now = utc_now()
+            updated = users.find_one_and_update(
+                {"_id": refreshed["_id"]},
+                {
+                    "$set": {
+                        "plan.type": selected_plan_type,
+                        "plan.selected_plan_type": selected_plan_type,
+                        "plan.status": PlanStatus.active.value,
+                        "plan.ends_at": None,
+                        "plan.restored_at": now,
+                        "updated_at": now,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            refreshed = updated or refreshed
 
     refreshed = expire_trial_if_needed(refreshed)
     return expire_grace_period_if_needed(refreshed)
