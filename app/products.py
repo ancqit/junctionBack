@@ -1,13 +1,16 @@
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .database import products
+from .login import get_current_user
+from .plan_service import ensure_can_add_product
 from .product_images import (
     delete_product_image,
     fetch_image_from_cdn,
@@ -233,7 +236,8 @@ def list_products(store_id: str | None = Query(default=None, min_length=1, max_l
 
 
 @router.post("", response_model=Product, status_code=status.HTTP_201_CREATED)
-def create_product(payload: ProductCreate) -> Product:
+def create_product(payload: ProductCreate, current_user: Annotated[dict, Depends(get_current_user)]) -> Product:
+    ensure_can_add_product(current_user, payload.store_id)
     products.create_index([("store_id", 1), ("sku", 1)], unique=True)
     now = datetime.now(timezone.utc)
     document = {**product_document_from_payload(payload), "created_at": now, "updated_at": now}
