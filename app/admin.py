@@ -1,13 +1,13 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from pymongo import ReturnDocument
 
 from .login import get_current_user
 from .plan_service import PlanSummary, PlanStatus, PlanType, admin_activate_user_plan, admin_deactivate_user_plan, build_plan_summary
+from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
 from .roles import UserRole, get_user_role
 from .database import users
 from .utils import parse_object_id
@@ -41,6 +41,15 @@ class AdminUserRecord(BaseModel):
 
 class UpdateUserRoleRequest(BaseModel):
     role: UserRole
+
+
+class RoleKeeperResponse(BaseModel):
+    mappings: dict[str, UserRole]
+    updated_at: datetime
+
+
+class RoleKeeperUpdateRequest(BaseModel):
+    mappings: dict[str, UserRole]
 
 
 def serialize_admin_user(user: dict) -> AdminUserRecord:
@@ -108,3 +117,29 @@ def update_user_role(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return serialize_admin_user(user)
+
+
+@router.get("/role-keeper", response_model=RoleKeeperResponse)
+def get_role_keeper(_: Annotated[dict, Depends(require_admin)]) -> RoleKeeperResponse:
+    document = get_role_keeper_document()
+    mappings = load_role_keeper()
+    return RoleKeeperResponse(
+        mappings={key: UserRole(value) for key, value in mappings.items()},
+        updated_at=document["updated_at"],
+    )
+
+
+@router.put("/role-keeper", response_model=RoleKeeperResponse)
+def update_role_keeper(
+    payload: RoleKeeperUpdateRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> RoleKeeperResponse:
+    try:
+        mappings = save_role_keeper({key: value.value for key, value in payload.mappings.items()})
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    document = get_role_keeper_document()
+    return RoleKeeperResponse(
+        mappings={key: UserRole(value) for key, value in mappings.items()},
+        updated_at=document["updated_at"],
+    )
