@@ -481,6 +481,18 @@ def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    current_role = get_user_role(user)
+    pre_deactivation_role = user.get("pre_deactivation_role")
+    if current_role != UserRole.viewer:
+        pre_deactivation_role = current_role.value
+    elif not pre_deactivation_role:
+        pre_deactivation_role = resolve_role_from_keeper(
+            email=user.get("email"),
+            phone_number=user.get("phone_number"),
+        )
+        if pre_deactivation_role == UserRole.admin.value:
+            pre_deactivation_role = UserRole.owner.value
+
     now = utc_now()
     updated = users.find_one_and_update(
         {"_id": user_id},
@@ -488,6 +500,7 @@ def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
             "$set": {
                 "account_status": "deactivated",
                 "role": UserRole.viewer.value,
+                "pre_deactivation_role": pre_deactivation_role,
                 "plan.status": PlanStatus.deactivated.value,
                 "plan.deactivated_at": now,
                 "plan.deactivated_by": "admin",
@@ -499,10 +512,109 @@ def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
     return build_plan_summary(updated)
 
 
+def _restored_activities_for_role(role: UserRole) -> list[str]:
+    if role == UserRole.admin:
+        return [
+            "manage_users",
+            "manage_plans",
+            "manage_shops",
+            "manage_products",
+            "manage_orders",
+            "manage_employees",
+            "post_notices",
+        ]
+    if role == UserRole.owner:
+        return [
+            "manage_shops",
+            "create_products",
+            "manage_products",
+            "manage_orders",
+            "manage_employees",
+            "post_notices",
+            "select_plans",
+        ]
+    return [
+        "view_shops",
+        "view_products",
+        "view_orders",
+        "view_profile",
+    ]
+
+
+def admin_reactivate_user_plan(user_id: ObjectId) -> dict:
+    user = users.find_one({"_id": user_id})
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if user.get("account_status") != "deactivated":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User account is not deactivated",
+        )
+
+    plan = user.get("plan") or {}
+    plan_type = plan.get("selected_plan_type") or plan.get("type") or PlanType.starter.value
+    if plan_type == PlanType.free_trial.value:
+        plan_type = PlanType.starter.value
+
+    stored_role = user.get("pre_deactivation_role")
+    if stored_role in {role.value for role in UserRole} and stored_role != UserRole.admin.value:
+        restored_role = stored_role
+    else:
+        restored_role = resolve_role_from_keeper(
+            email=user.get("email"),
+            phone_number=user.get("phone_number"),
+        )
+        if restored_role == UserRole.admin.value:
+            restored_role = UserRole.owner.value
+
+    now = utc_now()
+    updated = users.find_one_and_update(
+        {"_id": user_id},
+        {
+            "$set": {
+                "account_status": "active",
+                "role": restored_role,
+                "plan.type": plan_type,
+                "plan.status": PlanStatus.active.value,
+                "plan.selected_plan_type": plan_type,
+                "plan.activated_at": now,
+                "plan.activated_by": "admin",
+                "plan.reactivated_at": now,
+                "plan.grace_ends_at": None,
+                "plan.grace_started_at": None,
+                "plan.viewing_applied": False,
+                "updated_at": now,
+            },
+            "$unset": {
+                "plan.deactivated_at": "",
+                "plan.deactivated_by": "",
+                "pre_deactivation_role": "",
+            },
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    role = UserRole(restored_role)
+    plan_summary = build_plan_summary(updated)
+    return {
+        "user": updated,
+        "restored_role": role,
+        "restored_plan": plan_summary,
+        "restored_activities": _restored_activities_for_role(role),
+    }
+
+
 def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if user.get("account_status") == "deactivated":
+        result = admin_reactivate_user_plan(user_id)
+        return result["restored_plan"]
 
     plan = user.get("plan") or {}
     plan_type = plan.get("selected_plan_type") or plan.get("type") or PlanType.starter.value
