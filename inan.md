@@ -122,8 +122,13 @@ Uses Pexels API (`PEXELS_API_KEY`) to search stock images for product photos.
 |--------|----------|------|-----|
 | `GET` | `/queries` | Public | Search images. Query: `query`, `page`, `per_page`. |
 | `POST` | `/queries` | Public | Same search via body: `{ "query": "...", "page": 1, "per_page": 20 }`. |
+| `POST` | `/queries/suggest-images` | Public | Suggest 3 CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. Uses Gemini + Pexels. |
 
-Use a returned image URL with `POST /products/{id}/image/use`.
+**Suggested image flow:**
+1. `POST /queries/suggest-images` with the product name → get 3 options with `cdn_url`
+2. User picks one → `POST /products/{product_id}/image/use` with `{ "cdn": "<chosen cdn_url>" }`
+
+Requires `GEMINI_API_KEY` and `PEXELS_API_KEY`.
 
 ---
 

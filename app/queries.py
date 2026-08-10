@@ -4,10 +4,22 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from .gemini import generate_text, parse_json_string_array
+
 router = APIRouter(prefix="/queries", tags=["queries"])
 
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
+SUGGESTED_IMAGE_COUNT = 3
+
+IMAGE_SEARCH_PROMPT = (
+    "You help online shop owners find stock photos for product cards. "
+    "Given a product name, return a JSON array of exactly {count} short English search phrases "
+    "(2-6 words each) suitable for a stock photo website. "
+    "Use different angles such as product on white background, lifestyle use, and close-up detail. "
+    "Return only valid JSON: an array of strings.\n\n"
+    "Product name: {product_name}"
+)
 
 
 class QuerySearchRequest(BaseModel):
@@ -41,6 +53,24 @@ class QuerySearchResponse(BaseModel):
     page: int
     per_page: int
     total_results: int
+    images: list[ImageResult]
+
+
+class ProductImageSuggestRequest(BaseModel):
+    product_name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("product_name")
+    @classmethod
+    def product_name_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("product_name must not be blank")
+        return value
+
+
+class ProductImageSuggestResponse(BaseModel):
+    product_name: str
+    search_queries: list[str]
     images: list[ImageResult]
 
 
@@ -100,6 +130,53 @@ def search_cdn_images(query: str, page: int, per_page: int) -> QuerySearchRespon
     )
 
 
+def suggest_image_search_queries(product_name: str, count: int = SUGGESTED_IMAGE_COUNT) -> list[str]:
+    prompt = IMAGE_SEARCH_PROMPT.format(count=count, product_name=product_name)
+    response_text = generate_text(prompt)
+    queries = parse_json_string_array(response_text)
+    return queries[:count]
+
+
+def collect_suggested_images(product_name: str) -> ProductImageSuggestResponse:
+    search_queries = suggest_image_search_queries(product_name)
+    images: list[ImageResult] = []
+    seen_ids: set[str] = set()
+
+    for query in search_queries:
+        result = search_cdn_images(query, page=1, per_page=5)
+        for image in result.images:
+            if image.id in seen_ids:
+                continue
+            images.append(image)
+            seen_ids.add(image.id)
+            if len(images) >= SUGGESTED_IMAGE_COUNT:
+                break
+        if len(images) >= SUGGESTED_IMAGE_COUNT:
+            break
+
+    if len(images) < SUGGESTED_IMAGE_COUNT:
+        fallback = search_cdn_images(product_name, page=1, per_page=SUGGESTED_IMAGE_COUNT * 2)
+        for image in fallback.images:
+            if image.id in seen_ids:
+                continue
+            images.append(image)
+            seen_ids.add(image.id)
+            if len(images) >= SUGGESTED_IMAGE_COUNT:
+                break
+
+    if not images:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No images found for this product name",
+        )
+
+    return ProductImageSuggestResponse(
+        product_name=product_name,
+        search_queries=search_queries,
+        images=images[:SUGGESTED_IMAGE_COUNT],
+    )
+
+
 @router.get("", response_model=QuerySearchResponse)
 def search_images(
     query: str = Query(min_length=1, max_length=200),
@@ -115,3 +192,8 @@ def search_images(
 @router.post("", response_model=QuerySearchResponse, status_code=status.HTTP_200_OK)
 def search_images_post(payload: QuerySearchRequest) -> QuerySearchResponse:
     return search_cdn_images(payload.query, payload.page, payload.per_page)
+
+
+@router.post("/suggest-images", response_model=ProductImageSuggestResponse, status_code=status.HTTP_200_OK)
+def suggest_product_images(payload: ProductImageSuggestRequest) -> ProductImageSuggestResponse:
+    return collect_suggested_images(payload.product_name)
