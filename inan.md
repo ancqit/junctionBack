@@ -80,6 +80,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "..." }` (all required). Phone from logged-in user and **cannot be changed later**. |
 | `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, and/or `locality`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer | Delete a shop. |
+| `GET` | `/shops/types` | Public | List all shop/business types as a JSON array. Each item has `value`, `label`, `category` (`retail`, `food`, `beverage`, `services`, etc.), optional `group` (e.g. `technician`, `home_maintenance` under services), and `description`. |
 
 ---
 
