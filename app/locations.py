@@ -1,13 +1,22 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel
 
 from .database import cities, localities
 
 router = APIRouter(prefix="/locations", tags=["locations"])
 
-DEFAULT_CITIES = ["Mumbai", "Delhi", "Bengaluru", "Chennai", "Kolkata", "Hyderabad", "Pune"]
+DEFAULT_CITIES = [
+    "Mumbai",
+    "Delhi",
+    "Bengaluru",
+    "Chennai",
+    "Kolkata",
+    "Hyderabad",
+    "Pune",
+    "Ranchi",
+]
 
 DEFAULT_LOCALITIES: dict[str, list[str]] = {
     "Mumbai": ["Andheri West", "Bandra", "Dadar", "Powai", "Colaba"],
@@ -17,6 +26,26 @@ DEFAULT_LOCALITIES: dict[str, list[str]] = {
     "Kolkata": ["Salt Lake", "Park Street", "Ballygunge", "Howrah", "New Town"],
     "Hyderabad": ["Banjara Hills", "Gachibowli", "Hitech City", "Secunderabad", "Madhapur"],
     "Pune": ["Koregaon Park", "Hinjewadi", "Kothrud", "Viman Nagar", "Camp"],
+    "Ranchi": [
+        "Lalpur",
+        "Morabadi",
+        "Bariatu",
+        "Doranda",
+        "Ashok Nagar",
+        "Harmu Colony",
+        "Kanke",
+        "Hinoo",
+        "Argora",
+        "Ratu Road",
+        "Main Road",
+        "Namkum",
+        "Dhurwa",
+        "Kadru",
+        "Kantatoli",
+        "Kokar",
+        "Pundag",
+        "Tupudana",
+    ],
 }
 
 
@@ -31,6 +60,28 @@ class LocalityListResponse(BaseModel):
 
 def _normalize(value: str) -> str:
     return value.strip()
+
+
+def sync_default_locations() -> None:
+    """Ensure all built-in cities and localities exist (including newly added defaults)."""
+    now = datetime.now(timezone.utc)
+    cities.create_index("name", unique=True)
+    localities.create_index([("city", 1), ("name", 1)], unique=True)
+
+    for name in DEFAULT_CITIES:
+        cities.update_one(
+            {"name": name},
+            {"$setOnInsert": {"name": name, "created_at": now}},
+            upsert=True,
+        )
+
+    for city, names in DEFAULT_LOCALITIES.items():
+        for locality in names:
+            localities.update_one(
+                {"city": city, "name": locality},
+                {"$setOnInsert": {"city": city, "name": locality, "created_at": now}},
+                upsert=True,
+            )
 
 
 def seed_locations_if_empty() -> None:
@@ -48,6 +99,8 @@ def seed_locations_if_empty() -> None:
         ]
         localities.insert_many(documents)
         localities.create_index([("city", 1), ("name", 1)], unique=True)
+
+    sync_default_locations()
 
 
 @router.get("/cities", response_model=CityListResponse)
