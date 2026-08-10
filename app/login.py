@@ -15,10 +15,11 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from .admin_registry import is_admin_user
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, resolve_login_plan_string, restore_persisted_plan
 from .role_keeper import resolve_role_from_keeper
-from .roles import DEFAULT_USER_ROLE, UserRole, get_user_role
+from .roles import UserRole, get_user_role
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -145,38 +146,30 @@ def resolve_role_for_user(email: str | None = None, phone_number: str | None = N
     return resolve_role_from_keeper(email=email, phone_number=phone_number)
 
 
-def downgrade_deactivated_user_to_viewer(user: dict) -> dict:
-    if user.get("role") == UserRole.viewer.value:
-        return user
-    updated = users.find_one_and_update(
-        {"_id": user["_id"]},
-        {"$set": {"role": UserRole.viewer.value, "updated_at": datetime.now(timezone.utc)}},
-        return_document=ReturnDocument.AFTER,
-    )
-    return updated or user
-
-
 def sync_role_from_keeper(user: dict) -> dict:
-    if user.get("account_status") == "deactivated":
-        return downgrade_deactivated_user_to_viewer(user)
+    """Resolve role: admin list always wins; viewers only after trial/grace expiry."""
+    now = datetime.now(timezone.utc)
+    if is_admin_user(email=user.get("email"), phone_number=user.get("phone_number")):
+        target_role = UserRole.admin.value
+    elif (user.get("plan") or {}).get("viewing_applied"):
+        target_role = UserRole.viewer.value
+    else:
+        target_role = UserRole.owner.value
 
-    plan = user.get("plan") or {}
-    if plan.get("viewing_applied"):
-        if user.get("role") != UserRole.viewer.value:
-            updated = users.find_one_and_update(
-                {"_id": user["_id"]},
-                {"$set": {"role": UserRole.viewer.value, "updated_at": datetime.now(timezone.utc)}},
-                return_document=ReturnDocument.AFTER,
-            )
-            return updated or user
+    update_doc: dict = {}
+    if user.get("role") != target_role:
+        update_doc["$set"] = {"role": target_role, "updated_at": now}
+    if user.get("account_status") or user.get("pre_deactivation_role"):
+        update_doc.setdefault("$unset", {})
+        update_doc["$unset"]["account_status"] = ""
+        update_doc["$unset"]["pre_deactivation_role"] = ""
+
+    if not update_doc:
         return user
 
-    role = resolve_role_for_user(email=user.get("email"), phone_number=user.get("phone_number"))
-    if user.get("role") == role:
-        return user
     updated = users.find_one_and_update(
         {"_id": user["_id"]},
-        {"$set": {"role": role, "updated_at": datetime.now(timezone.utc)}},
+        update_doc,
         return_document=ReturnDocument.AFTER,
     )
     return updated or user

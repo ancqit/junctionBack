@@ -7,8 +7,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel
 from pymongo import ReturnDocument
 
-from .database import products, users
-from .role_keeper import resolve_role_from_keeper
+from .database import plan_applications, products, users
 from .roles import UserRole, get_user_role
 
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
@@ -181,7 +180,6 @@ def restore_persisted_plan(user: dict) -> dict:
 
     if plan.get("status") not in {
         PlanStatus.grace_period.value,
-        PlanStatus.deactivated.value,
         PlanStatus.expired.value,
     } and not plan.get("viewing_applied"):
         selected_plan_type = plan.get("selected_plan_type")
@@ -346,8 +344,7 @@ def build_plan_summary(user: dict) -> PlanSummary:
     in_grace_period = status_value == PlanStatus.grace_period
 
     days_remaining = None
-    account_status = user.get("account_status", "active")
-    is_active = status_value in {PlanStatus.active, PlanStatus.grace_period} and account_status == "active"
+    is_active = status_value in {PlanStatus.active, PlanStatus.grace_period}
 
     countdown_end = grace_ends_at if in_grace_period else ends_at
     if countdown_end is not None:
@@ -358,9 +355,6 @@ def build_plan_summary(user: dict) -> PlanSummary:
         if utc_now() >= countdown_end:
             if in_grace_period or plan_type == PlanType.free_trial:
                 is_active = False
-
-    if status_value == PlanStatus.deactivated or account_status != "active":
-        is_active = False
 
     return PlanSummary(
         type=plan_type,
@@ -406,20 +400,26 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
     if get_user_role(user) == UserRole.admin:
         return admin_plan_summary()
 
+    if get_user_role(user) == UserRole.viewer:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Viewers cannot select a plan directly. Join the waitlist to be activated by an admin.",
+        )
+
+    existing_plan = user.get("plan") or {}
+    if existing_plan.get("viewing_applied"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Viewers cannot select a plan directly. Join the waitlist to be activated by an admin.",
+        )
+
     if plan_type == PlanType.free_trial:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be selected manually")
 
-    existing_plan = user.get("plan") or {}
     if existing_plan.get("trial_used") and plan_type == PlanType.free_trial:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial has already been used")
 
     now = utc_now()
-    restored_role = resolve_role_from_keeper(
-        email=user.get("email"),
-        phone_number=user.get("phone_number"),
-    )
-    if restored_role == UserRole.admin.value:
-        restored_role = UserRole.owner.value
     plan_document = {
         "type": plan_type.value,
         "status": PlanStatus.active.value,
@@ -434,7 +434,7 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
     }
     updated = users.find_one_and_update(
         {"_id": user_id},
-        {"$set": {"plan": plan_document, "role": restored_role, "updated_at": now}},
+        {"$set": {"plan": plan_document, "role": UserRole.owner.value, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
     return build_plan_summary(updated)
@@ -476,120 +476,68 @@ def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
     return build_plan_summary(updated)
 
 
-def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
+def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
+    """Approve a pending waitlist application and upgrade a viewer to owner with their requested plan."""
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    current_role = get_user_role(user)
-    pre_deactivation_role = user.get("pre_deactivation_role")
-    if current_role != UserRole.viewer:
-        pre_deactivation_role = current_role.value
-    elif not pre_deactivation_role:
-        pre_deactivation_role = resolve_role_from_keeper(
-            email=user.get("email"),
-            phone_number=user.get("phone_number"),
-        )
-        if pre_deactivation_role == UserRole.admin.value:
-            pre_deactivation_role = UserRole.owner.value
-
-    now = utc_now()
-    updated = users.find_one_and_update(
-        {"_id": user_id},
-        {
-            "$set": {
-                "account_status": "deactivated",
-                "role": UserRole.viewer.value,
-                "pre_deactivation_role": pre_deactivation_role,
-                "plan.status": PlanStatus.deactivated.value,
-                "plan.deactivated_at": now,
-                "plan.deactivated_by": "admin",
-                "updated_at": now,
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    return build_plan_summary(updated)
-
-
-def _restored_activities_for_role(role: UserRole) -> list[str]:
-    if role == UserRole.admin:
-        return [
-            "manage_users",
-            "manage_plans",
-            "manage_shops",
-            "manage_products",
-            "manage_orders",
-            "manage_employees",
-            "post_notices",
-        ]
-    if role == UserRole.owner:
-        return [
-            "manage_shops",
-            "create_products",
-            "manage_products",
-            "manage_orders",
-            "manage_employees",
-            "post_notices",
-            "select_plans",
-        ]
-    return [
-        "view_shops",
-        "view_products",
-        "view_orders",
-        "view_profile",
-    ]
-
-
-def admin_reactivate_user_plan(user_id: ObjectId) -> dict:
-    user = users.find_one({"_id": user_id})
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    if user.get("account_status") != "deactivated":
+    if get_user_role(user) == UserRole.admin:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User account is not deactivated",
+            detail="Admin accounts are not activated via the waitlist",
         )
 
-    plan = user.get("plan") or {}
-    plan_type = plan.get("selected_plan_type") or plan.get("type") or PlanType.starter.value
-    if plan_type == PlanType.free_trial.value:
-        plan_type = PlanType.starter.value
-
-    stored_role = user.get("pre_deactivation_role")
-    if stored_role in {role.value for role in UserRole} and stored_role != UserRole.admin.value:
-        restored_role = stored_role
-    else:
-        restored_role = resolve_role_from_keeper(
-            email=user.get("email"),
-            phone_number=user.get("phone_number"),
+    if get_user_role(user) != UserRole.viewer:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only viewers on the waitlist can be activated. Owners should select a plan at POST /plans/select.",
         )
-        if restored_role == UserRole.admin.value:
-            restored_role = UserRole.owner.value
+
+    application = plan_applications.find_one(
+        {"user_id": str(user_id), "status": "pending"},
+        sort=[("created_at", -1)],
+    )
+    if application is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no pending waitlist application",
+        )
+
+    plan_type_value = application.get("requested_plan_type") or PlanType.starter.value
+    if plan_type_value == PlanType.free_trial.value:
+        plan_type_value = PlanType.starter.value
+    plan_type = PlanType(plan_type_value)
 
     now = utc_now()
+    existing_plan = user.get("plan") or {}
+    plan_document = {
+        "type": plan_type.value,
+        "status": PlanStatus.active.value,
+        "started_at": now,
+        "ends_at": None,
+        "grace_ends_at": None,
+        "grace_started_at": None,
+        "viewing_applied": False,
+        "trial_used": bool(existing_plan.get("trial_used", False)),
+        "selected_plan_type": plan_type.value,
+        "activated_at": now,
+        "activated_by": "admin",
+        "selected_at": now,
+    }
     updated = users.find_one_and_update(
         {"_id": user_id},
         {
             "$set": {
-                "account_status": "active",
-                "role": restored_role,
-                "plan.type": plan_type,
-                "plan.status": PlanStatus.active.value,
-                "plan.selected_plan_type": plan_type,
-                "plan.activated_at": now,
-                "plan.activated_by": "admin",
-                "plan.reactivated_at": now,
-                "plan.grace_ends_at": None,
-                "plan.grace_started_at": None,
-                "plan.viewing_applied": False,
+                "plan": plan_document,
+                "role": UserRole.owner.value,
                 "updated_at": now,
             },
             "$unset": {
+                "account_status": "",
+                "pre_deactivation_role": "",
                 "plan.deactivated_at": "",
                 "plan.deactivated_by": "",
-                "pre_deactivation_role": "",
             },
         },
         return_document=ReturnDocument.AFTER,
@@ -597,59 +545,9 @@ def admin_reactivate_user_plan(user_id: ObjectId) -> dict:
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    role = UserRole(restored_role)
-    plan_summary = build_plan_summary(updated)
-    return {
-        "user": updated,
-        "restored_role": role,
-        "restored_plan": plan_summary,
-        "restored_activities": _restored_activities_for_role(role),
-    }
-
-
-def admin_activate_user_plan(user_id: ObjectId) -> PlanSummary:
-    user = users.find_one({"_id": user_id})
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    if user.get("account_status") == "deactivated":
-        result = admin_reactivate_user_plan(user_id)
-        return result["restored_plan"]
-
-    plan = user.get("plan") or {}
-    plan_type = plan.get("selected_plan_type") or plan.get("type") or PlanType.starter.value
-    if plan_type == PlanType.free_trial.value:
-        plan_type = PlanType.starter.value
-
-    now = utc_now()
-    restored_role = resolve_role_from_keeper(
-        email=user.get("email"),
-        phone_number=user.get("phone_number"),
-    )
-    if restored_role == UserRole.admin.value:
-        restored_role = UserRole.owner.value
-    updated = users.find_one_and_update(
-        {"_id": user_id},
-        {
-            "$set": {
-                "account_status": "active",
-                "role": restored_role,
-                "plan.type": plan_type,
-                "plan.status": PlanStatus.active.value,
-                "plan.selected_plan_type": plan_type,
-                "plan.activated_at": now,
-                "plan.activated_by": "admin",
-                "plan.grace_ends_at": None,
-                "plan.grace_started_at": None,
-                "plan.viewing_applied": False,
-                "updated_at": now,
-            },
-            "$unset": {
-                "plan.deactivated_at": "",
-                "plan.deactivated_by": "",
-            },
-        },
-        return_document=ReturnDocument.AFTER,
+    plan_applications.update_one(
+        {"_id": application["_id"]},
+        {"$set": {"status": "approved", "approved_at": now, "updated_at": now}},
     )
     return build_plan_summary(updated)
 

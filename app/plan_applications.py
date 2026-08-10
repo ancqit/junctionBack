@@ -104,6 +104,16 @@ def serialize_application(document: dict) -> PlanApplication:
     )
 
 
+def _require_viewer_for_waitlist(user: dict) -> None:
+    if get_user_role(user) == UserRole.admin:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admins are not subject to plan applications")
+    if get_user_role(user) != UserRole.viewer:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only viewers can join the waitlist. Owners can select a plan directly at POST /plans/select.",
+        )
+
+
 @router.get("/apply/preview", response_model=PlanApplyPreview)
 def preview_plan_application(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -112,6 +122,7 @@ def preview_plan_application(
     if plan_type == PlanType.free_trial:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be applied for")
 
+    _require_viewer_for_waitlist(current_user)
     summary = build_plan_summary(current_user)
     current_type = summary.type
     is_switch, message = build_switch_message(current_type, plan_type)
@@ -132,8 +143,7 @@ def apply_for_plan(
 ) -> PlanApplication:
     if payload.plan_type == PlanType.free_trial:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be applied for")
-    if get_user_role(current_user) == UserRole.admin:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admins are not subject to plan applications")
+    _require_viewer_for_waitlist(current_user)
 
     shop = get_user_shop(payload.shop_id, current_user)
     city = shop.get("city", "").strip()
