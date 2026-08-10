@@ -253,8 +253,9 @@ All endpoints require **admin** role.
 | Method | Endpoint | Use |
 |--------|----------|-----|
 | `GET` | `/admin/users` | List all users with role, plan status, account status. |
-| `POST` | `/admin/users/{user_id}/activate` | Reactivate a deactivated user and restore their plan. |
-| `POST` | `/admin/users/{user_id}/deactivate` | Deactivate a user account. |
+| `POST` | `/admin/users/{user_id}/activate` | Reactivate a deactivated user and restore their plan (alias). |
+| `POST` | `/admin/users/{user_id}/reactivate` | Reactivate a deactivated user, restore their previous role, active plan, and list restored activities (e.g. `create_products`, `manage_shops`). |
+| `POST` | `/admin/users/{user_id}/deactivate` | Deactivate a user account (login allowed as `viewer`). |
 | `PATCH` | `/admin/users/{user_id}/role` | Change user role (`owner` / `viewer`). Body: `{ "role": "viewer" }`. Admins are not set here — use admin list. |
 | `GET` | `/admin/role-keeper` | Read MongoDB role keeper (owner/viewer phone → role map). |
 | `PUT` | `/admin/role-keeper` | Update role keeper mappings. Admins cannot be added here. |

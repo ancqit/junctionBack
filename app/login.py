@@ -145,7 +145,21 @@ def resolve_role_for_user(email: str | None = None, phone_number: str | None = N
     return resolve_role_from_keeper(email=email, phone_number=phone_number)
 
 
+def downgrade_deactivated_user_to_viewer(user: dict) -> dict:
+    if user.get("role") == UserRole.viewer.value:
+        return user
+    updated = users.find_one_and_update(
+        {"_id": user["_id"]},
+        {"$set": {"role": UserRole.viewer.value, "updated_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or user
+
+
 def sync_role_from_keeper(user: dict) -> dict:
+    if user.get("account_status") == "deactivated":
+        return downgrade_deactivated_user_to_viewer(user)
+
     plan = user.get("plan") or {}
     if plan.get("viewing_applied"):
         if user.get("role") != UserRole.viewer.value:
@@ -168,14 +182,6 @@ def sync_role_from_keeper(user: dict) -> dict:
     return updated or user
 
 
-def ensure_account_is_active(user: dict) -> None:
-    if user.get("account_status") == "deactivated":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been deactivated by an administrator.",
-        )
-
-
 def require_gcp_otp_configuration() -> None:
     if not GCP_IDENTITY_PLATFORM_API_KEY:
         raise HTTPException(status_code=503, detail="GCP Identity Platform API key is not configured")
@@ -190,7 +196,6 @@ def gcp_error(response: httpx.Response) -> HTTPException:
 
 
 def token_response(user: dict) -> TokenResponse:
-    ensure_account_is_active(user)
     role = get_user_role(user)
     if role != UserRole.admin:
         if user.get("plan") is None:
@@ -225,7 +230,6 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     user = users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise error
-    ensure_account_is_active(user)
     user = restore_persisted_plan(user)
     return sync_role_from_keeper(user)
 

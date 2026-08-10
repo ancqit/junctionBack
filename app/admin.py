@@ -19,6 +19,7 @@ from .plan_service import (
     admin_activate_user_plan,
     admin_deactivate_user_plan,
     admin_delete_users,
+    admin_reactivate_user_plan,
     build_plan_summary,
 )
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
@@ -98,6 +99,13 @@ class AdminRegistryResponse(BaseModel):
     file_path: str
 
 
+class ReactivateUserResponse(BaseModel):
+    user: AdminUserRecord
+    restored_role: UserRole
+    restored_plan: PlanSummary
+    restored_activities: list[str]
+
+
 def serialize_admin_user(user: dict) -> AdminUserRecord:
     plan = build_plan_summary(user)
     return AdminUserRecord(
@@ -149,6 +157,18 @@ def activate_user(user_id: str, _: Annotated[dict, Depends(require_admin)]) -> A
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return serialize_admin_user(user)
+
+
+@router.post("/users/{user_id}/reactivate", response_model=ReactivateUserResponse)
+def reactivate_user(user_id: str, _: Annotated[dict, Depends(require_admin)]) -> ReactivateUserResponse:
+    object_id = parse_object_id(user_id, "User")
+    result = admin_reactivate_user_plan(object_id)
+    return ReactivateUserResponse(
+        user=serialize_admin_user(result["user"]),
+        restored_role=result["restored_role"],
+        restored_plan=result["restored_plan"],
+        restored_activities=result["restored_activities"],
+    )
 
 
 @router.post("/users/{user_id}/deactivate", response_model=AdminUserRecord)
