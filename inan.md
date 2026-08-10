@@ -79,12 +79,21 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `POST` | `/products` | Bearer | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
 | `PUT` | `/products/{product_id}` | Public | Update product fields (name, price, stock, status, image, etc.). |
 | `DELETE` | `/products/{product_id}` | Public | Delete a product. |
+| `POST` | `/products/images/suggest` | Public | Suggest **10** Gemini-generated CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. |
 | `GET` | `/products/images/{stored_image_id}` | Public | Serve a stored product image (from upload or query flow). |
-| `POST` | `/products/{product_id}/image/cdn` | Public | Set product image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
-| `POST` | `/products/{product_id}/image/use` | Public | Download image from CDN URL, store in GridFS, attach to product. Body: `{ "cdn": "https://..." }`. |
-| `POST` | `/products/{product_id}/image/upload` | Public | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and attaches to product. |
+| `POST` | `/products/{product_id}/image/cdn` | Public | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
+| `POST` | `/products/{product_id}/image/use` | Public | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
+| `POST` | `/products/{product_id}/images` | Public | Attach up to **5** chosen CDN images to the product. Body: `{ "cdns": ["https://...", "..."] }`. Replaces the gallery. |
+| `POST` | `/products/{product_id}/image/upload` | Public | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and adds to gallery (max 5). |
 
-**Image flows:** CDN link only → `/image/cdn` · Search then use → `/queries` + `/image/use` · Direct upload → `/image/upload`
+**Product images:** Each product supports up to **5** images in `images[]`. The first image is also exposed as `image` / `image_cdn` (hero).
+
+**Suggested image flow:**
+1. `GET /queries?query=wireless+earbuds&per_page=10` or `POST /products/images/suggest` → get **10** generated CDN options
+2. User picks up to **5** → `POST /products/{product_id}/images` with `{ "cdns": ["...", "..."] }`
+3. Or add one at a time via `/image/use` or `/image/upload`
+
+**Other image flows:** CDN link only → `/image/cdn` · Manual search → `/queries` + `/image/use`
 
 ---
 
@@ -116,14 +125,48 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 
 ## Image search / Queries (`/queries`)
 
-Uses Pexels API (`PEXELS_API_KEY`) to search stock images for product photos.
+Pexels-style API powered by **Gemini image generation**. Pass a product keyword and receive generated product photos with CDN URLs served by this backend.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/queries` | Public | Search images. Query: `query`, `page`, `per_page`. |
-| `POST` | `/queries` | Public | Same search via body: `{ "query": "...", "page": 1, "per_page": 20 }`. |
+| `GET` | `/queries` | Public | Generate images from a keyword. Query: `query`, `page`, `per_page` (max 10). |
+| `POST` | `/queries` | Public | Same via body: `{ "query": "wireless earbuds", "page": 1, "per_page": 10 }`. |
+| `POST` | `/queries/suggest-images` | Public | Alias that returns **10** generated options. Body: `{ "product_name": "wireless earbuds" }`. Prefer `POST /products/images/suggest`. |
 
-Use a returned image URL with `POST /products/{id}/image/use`.
+**Response shape (like Pexels):**
+```json
+{
+  "query": "wireless earbuds",
+  "page": 1,
+  "per_page": 10,
+  "total_results": 10,
+  "images": [
+    {
+      "id": "...",
+      "cdn_url": "https://junctionback.onrender.com/products/images/...",
+      "thumbnail_url": "https://junctionback.onrender.com/products/images/...",
+      "alt": "wireless earbuds - front view ...",
+      "width": 1024,
+      "height": 1024,
+      "source": "gemini"
+    }
+  ]
+}
+```
+
+Requires `GEMINI_API_KEY`. Optional: `GEMINI_IMAGE_MODEL` (default `gemini-2.0-flash-preview-image-generation`).
+
+---
+
+## Product descriptions (`/descriptions`)
+
+Uses Google Gemini (`GEMINI_API_KEY`) to expand a short product summary into a detailed description.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `POST` | `/descriptions/generate` | Public | Body: `{ "text": "wireless earbuds" }`. Returns `{ "description": "..." }`. |
+
+Optional env: `GEMINI_MODEL` (default `gemini-2.0-flash`).
 
 ---
 
@@ -169,7 +212,7 @@ Seeded with default Indian cities and localities on first request. When a user c
 | Plan | Price | Products | Notes |
 |------|-------|----------|-------|
 | Free Trial | ₹0 | 150 | 15 days full access |
-| Starter | ₹0 | 0 | Profile only |
+| Starter | ₹0 | 10 | Profile and up to 10 products |
 | Growth | ₹399 | 100 | |
 | Premium | ₹599 | 150+ | Unlimited |
 
@@ -240,10 +283,10 @@ Early demo CRUD — not tied to shops.
 4. `POST /employees` with same `store_id`
 5. `POST /orders` when a sale is made
 
-### Add product image
-1. `GET /queries?query=shirt` → pick image URL
-2. `POST /products/{id}/image/use` with `{ "cdn": "<url>" }`
-3. Or `POST /products/{id}/image/upload` with file
+### Add product images
+1. `GET /queries?query=shirt&per_page=10` or `POST /products/images/suggest` → pick up to 5 CDN URLs
+2. `POST /products/{id}/images` with `{ "cdns": ["...", "..."] }`
+3. Or `POST /products/{id}/image/upload` with file (max 5 total per product)
 
 ### Admin setup (production)
 1. Set `ADMIN_LIST_JSON` on Render
