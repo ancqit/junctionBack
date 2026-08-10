@@ -10,13 +10,15 @@ router = APIRouter(prefix="/queries", tags=["queries"])
 
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
-SUGGESTED_IMAGE_COUNT = 3
+DEFAULT_SUGGESTED_IMAGE_COUNT = 10
 
 IMAGE_SEARCH_PROMPT = (
-    "You help online shop owners find stock photos for product cards. "
+    "You help online shop owners find realistic product photos like Google Shopping or Amazon listings. "
     "Given a product name, return a JSON array of exactly {count} short English search phrases "
-    "(2-6 words each) suitable for a stock photo website. "
-    "Use different angles such as product on white background, lifestyle use, and close-up detail. "
+    "(3-8 words each) for a stock photo website. "
+    "Cover varied e-commerce angles: front on white background, 45-degree angle, side view, back view, "
+    "top view, detail close-up, lifestyle in use, packaging, and hands holding the product. "
+    "Phrases must stay specific to the exact product name. "
     "Return only valid JSON: an array of strings.\n\n"
     "Product name: {product_name}"
 )
@@ -130,15 +132,18 @@ def search_cdn_images(query: str, page: int, per_page: int) -> QuerySearchRespon
     )
 
 
-def suggest_image_search_queries(product_name: str, count: int = SUGGESTED_IMAGE_COUNT) -> list[str]:
+def suggest_image_search_queries(product_name: str, count: int = DEFAULT_SUGGESTED_IMAGE_COUNT) -> list[str]:
     prompt = IMAGE_SEARCH_PROMPT.format(count=count, product_name=product_name)
     response_text = generate_text(prompt)
     queries = parse_json_string_array(response_text)
     return queries[:count]
 
 
-def collect_suggested_images(product_name: str) -> ProductImageSuggestResponse:
-    search_queries = suggest_image_search_queries(product_name)
+def collect_suggested_images(
+    product_name: str,
+    count: int = DEFAULT_SUGGESTED_IMAGE_COUNT,
+) -> ProductImageSuggestResponse:
+    search_queries = suggest_image_search_queries(product_name, count=count)
     images: list[ImageResult] = []
     seen_ids: set[str] = set()
 
@@ -149,19 +154,19 @@ def collect_suggested_images(product_name: str) -> ProductImageSuggestResponse:
                 continue
             images.append(image)
             seen_ids.add(image.id)
-            if len(images) >= SUGGESTED_IMAGE_COUNT:
+            if len(images) >= count:
                 break
-        if len(images) >= SUGGESTED_IMAGE_COUNT:
+        if len(images) >= count:
             break
 
-    if len(images) < SUGGESTED_IMAGE_COUNT:
-        fallback = search_cdn_images(product_name, page=1, per_page=SUGGESTED_IMAGE_COUNT * 2)
+    if len(images) < count:
+        fallback = search_cdn_images(product_name, page=1, per_page=count * 2)
         for image in fallback.images:
             if image.id in seen_ids:
                 continue
             images.append(image)
             seen_ids.add(image.id)
-            if len(images) >= SUGGESTED_IMAGE_COUNT:
+            if len(images) >= count:
                 break
 
     if not images:
@@ -173,7 +178,7 @@ def collect_suggested_images(product_name: str) -> ProductImageSuggestResponse:
     return ProductImageSuggestResponse(
         product_name=product_name,
         search_queries=search_queries,
-        images=images[:SUGGESTED_IMAGE_COUNT],
+        images=images[:count],
     )
 
 
