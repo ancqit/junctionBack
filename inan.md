@@ -79,7 +79,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `POST` | `/products` | Bearer | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
 | `PUT` | `/products/{product_id}` | Public | Update product fields (name, price, stock, status, image, etc.). |
 | `DELETE` | `/products/{product_id}` | Public | Delete a product. |
-| `POST` | `/products/images/suggest` | Public | Suggest **10** CDN images for a product name (Gemini + Pexels). Body: `{ "product_name": "wireless earbuds" }`. |
+| `POST` | `/products/images/suggest` | Public | Suggest **10** Gemini-generated CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. |
 | `GET` | `/products/images/{stored_image_id}` | Public | Serve a stored product image (from upload or query flow). |
 | `POST` | `/products/{product_id}/image/cdn` | Public | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
 | `POST` | `/products/{product_id}/image/use` | Public | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
@@ -89,7 +89,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 **Product images:** Each product supports up to **5** images in `images[]`. The first image is also exposed as `image` / `image_cdn` (hero).
 
 **Suggested image flow:**
-1. `POST /products/images/suggest` with the product name → get **10** CDN options
+1. `GET /queries?query=wireless+earbuds&per_page=10` or `POST /products/images/suggest` → get **10** generated CDN options
 2. User picks up to **5** → `POST /products/{product_id}/images` with `{ "cdns": ["...", "..."] }`
 3. Or add one at a time via `/image/use` or `/image/upload`
 
@@ -125,15 +125,36 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 
 ## Image search / Queries (`/queries`)
 
-Uses Pexels API (`PEXELS_API_KEY`) to search stock images for product photos.
+Pexels-style API powered by **Gemini image generation**. Pass a product keyword and receive generated product photos with CDN URLs served by this backend.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/queries` | Public | Search images. Query: `query`, `page`, `per_page`. |
-| `POST` | `/queries` | Public | Same search via body: `{ "query": "...", "page": 1, "per_page": 20 }`. |
-| `POST` | `/queries/suggest-images` | Public | Alias for product image suggestions. Returns **10** CDN options. Body: `{ "product_name": "wireless earbuds" }`. Prefer `POST /products/images/suggest`. |
+| `GET` | `/queries` | Public | Generate images from a keyword. Query: `query`, `page`, `per_page` (max 10). |
+| `POST` | `/queries` | Public | Same via body: `{ "query": "wireless earbuds", "page": 1, "per_page": 10 }`. |
+| `POST` | `/queries/suggest-images` | Public | Alias that returns **10** generated options. Body: `{ "product_name": "wireless earbuds" }`. Prefer `POST /products/images/suggest`. |
 
-Requires `GEMINI_API_KEY` and `PEXELS_API_KEY`.
+**Response shape (like Pexels):**
+```json
+{
+  "query": "wireless earbuds",
+  "page": 1,
+  "per_page": 10,
+  "total_results": 10,
+  "images": [
+    {
+      "id": "...",
+      "cdn_url": "https://junctionback.onrender.com/products/images/...",
+      "thumbnail_url": "https://junctionback.onrender.com/products/images/...",
+      "alt": "wireless earbuds - front view ...",
+      "width": 1024,
+      "height": 1024,
+      "source": "gemini"
+    }
+  ]
+}
+```
+
+Requires `GEMINI_API_KEY`. Optional: `GEMINI_IMAGE_MODEL` (default `gemini-2.0-flash-preview-image-generation`).
 
 ---
 
@@ -263,7 +284,7 @@ Early demo CRUD — not tied to shops.
 5. `POST /orders` when a sale is made
 
 ### Add product images
-1. `POST /products/images/suggest` with `{ "product_name": "shirt" }` → pick up to 5 from 10 CDN options
+1. `GET /queries?query=shirt&per_page=10` or `POST /products/images/suggest` → pick up to 5 CDN URLs
 2. `POST /products/{id}/images` with `{ "cdns": ["...", "..."] }`
 3. Or `POST /products/{id}/image/upload` with file (max 5 total per product)
 

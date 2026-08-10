@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pymongo import ReturnDocument
@@ -18,12 +19,13 @@ from .product_images import (
     save_product_image,
     validate_image_upload,
 )
-from .queries import ProductImageSuggestResponse, collect_suggested_images
+from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/products", tags=["products"])
 
 MAX_PRODUCT_IMAGES = 5
+INTERNAL_IMAGE_CDN_PATTERN = re.compile(r"/products/images/([a-fA-F0-9]{24})(?:\?.*)?$")
 
 
 class ProductStatus(str, Enum):
@@ -36,6 +38,7 @@ class ProductImageSource(str, Enum):
     cdn = "cdn"
     query = "query"
     upload = "upload"
+    gemini = "gemini"
 
 
 class ProductImage(BaseModel):
@@ -282,6 +285,27 @@ def product_document_from_payload(payload: ProductCreate) -> dict:
     return document
 
 
+async def product_image_from_cdn_url(
+    *,
+    cdn_url: str,
+    product_id: str,
+    store_id: str | None,
+) -> ProductImage:
+    match = INTERNAL_IMAGE_CDN_PATTERN.search(cdn_url)
+    if match:
+        return ProductImage(
+            source=ProductImageSource.gemini,
+            cdn=cdn_url,
+            stored_image_id=match.group(1),
+        )
+
+    return await store_product_image_from_cdn(
+        cdn_url=cdn_url,
+        product_id=product_id,
+        store_id=store_id,
+    )
+
+
 async def store_product_image_from_cdn(
     *,
     cdn_url: str,
@@ -308,8 +332,12 @@ async def store_product_image_from_cdn(
 
 
 @router.post("/images/suggest", response_model=ProductImageSuggestResponse, status_code=status.HTTP_200_OK)
-def suggest_product_images(payload: ProductImagesSuggestRequest) -> ProductImageSuggestResponse:
-    return collect_suggested_images(payload.product_name, count=10)
+def suggest_product_images(payload: ProductImagesSuggestRequest, request: Request) -> ProductImageSuggestResponse:
+    return collect_suggested_images(
+        payload.product_name,
+        count=10,
+        base_url=request_base_url(request),
+    )
 
 
 @router.get("/images/{stored_image_id}")
@@ -358,7 +386,7 @@ async def use_product_image_from_cdn(product_id: str, payload: ProductImageUseRe
             detail=f"A product can have at most {MAX_PRODUCT_IMAGES} images",
         )
 
-    image = await store_product_image_from_cdn(
+    image = await product_image_from_cdn_url(
         cdn_url=str(payload.cdn),
         product_id=product_id,
         store_id=product.get("store_id"),
@@ -383,7 +411,7 @@ async def attach_product_images_from_cdns(product_id: str, payload: ProductImage
     stored_images: list[ProductImage] = []
     for cdn in payload.cdns:
         stored_images.append(
-            await store_product_image_from_cdn(
+            await product_image_from_cdn_url(
                 cdn_url=str(cdn),
                 product_id=product_id,
                 store_id=product.get("store_id"),
