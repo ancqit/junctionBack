@@ -56,6 +56,18 @@ Authorization: Bearer <access_token>
 
 ---
 
+## Notices (`/notices`)
+
+Daily notice board for shop offers and announcements. One notice per shop per UTC calendar day.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `POST` | `/notices` | Bearer | Post or update today's notice. Body: `{ "store_id": "<shop_id>", "message": "20% off today!" }`. |
+| `GET` | `/notices/today?store_id=<shop_id>` | Public | Get today's notice for a shop. |
+| `GET` | `/notices` | Bearer | List today's notices for the logged-in owner's shops (admins see all). |
+
+---
+
 ## Shops (`/shops`)
 
 Shops are the main entry point. Products and employees are linked via `store_id` = shop `id`.
@@ -68,6 +80,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "..." }` (all required). Phone from logged-in user and **cannot be changed later**. |
 | `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, and/or `locality`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer | Delete a shop. |
+| `GET` | `/shops/types` | Public | List all shop/business types as a JSON array. Each item has `value`, `label`, `category` (`retail`, `food`, `beverage`, `services`, etc.), optional `group` (e.g. `technician`, `home_maintenance` under services), and `description`. |
 
 ---
 

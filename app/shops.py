@@ -11,6 +11,7 @@ from .database import shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
 from .roles import UserRole, get_user_role
+from .shop_types import SHOP_TYPES, ShopTypeInfo
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/shops", tags=["shops"])
@@ -102,6 +103,11 @@ def get_user_phone_number(user: dict) -> str:
             detail="A verified phone number is required before creating a shop",
         )
     return phone_number
+
+
+@router.get("/types", response_model=list[ShopTypeInfo])
+def list_shop_types() -> list[ShopTypeInfo]:
+    return SHOP_TYPES
 
 
 @router.get("", response_model=list[Shop])

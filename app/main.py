@@ -20,7 +20,7 @@ from .orders import router as orders_router
 from .plans import router as plans_router
 from .plan_applications import router as plan_applications_router
 from .products import router as products_router
-from .profile import router as profile_router
+from .profile import notices_router, router as profile_router
 from .queries import router as queries_router
 from .shops import router as shops_router
 from .terms import router as terms_router
@@ -50,6 +50,7 @@ app.add_middleware(
 app.include_router(login_router)
 app.include_router(digilocker_router)
 app.include_router(profile_router)
+app.include_router(notices_router)
 app.include_router(products_router)
 app.include_router(employees_router)
 app.include_router(orders_router)
