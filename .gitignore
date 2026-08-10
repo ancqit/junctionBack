@@ -147,6 +147,9 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Local MongoDB data for Cloud Agent development
+.mongodb-data/
+
 # Environments
 .env
 role_keeper.json
