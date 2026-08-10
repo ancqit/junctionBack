@@ -21,6 +21,7 @@ if ! mongo_ready; then
     --dbpath "$MONGO_DATA_DIR" \
     --bind_ip 127.0.0.1 \
     --port 27017 \
+    --nounixsocket \
     --fork \
     --logpath "$MONGO_LOG"
 fi
