@@ -476,8 +476,8 @@ def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
     return build_plan_summary(updated)
 
 
-def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
-    """Approve a pending waitlist application and upgrade a viewer to owner with their requested plan."""
+def admin_approve_waitlist_application(user_id: ObjectId) -> PlanSummary:
+    """Approve a pending waitlist application: upgrade viewers to owner, apply plan for owners."""
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -488,10 +488,11 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
             detail="Admin accounts are not activated via the waitlist",
         )
 
-    if get_user_role(user) != UserRole.viewer:
+    role = get_user_role(user)
+    if role not in {UserRole.owner, UserRole.viewer}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only viewers on the waitlist can be activated. Owners should select a plan at POST /plans/select.",
+            detail="Only owners and viewers with a pending waitlist application can be activated",
         )
 
     application = plan_applications.find_one(
@@ -514,7 +515,7 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
     plan_document = {
         "type": plan_type.value,
         "status": PlanStatus.active.value,
-        "started_at": now,
+        "started_at": existing_plan.get("started_at", now),
         "ends_at": None,
         "grace_ends_at": None,
         "grace_started_at": None,
@@ -525,12 +526,13 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
         "activated_by": "admin",
         "selected_at": now,
     }
+    role_after = UserRole.owner.value
     updated = users.find_one_and_update(
         {"_id": user_id},
         {
             "$set": {
                 "plan": plan_document,
-                "role": UserRole.owner.value,
+                "role": role_after,
                 "updated_at": now,
             },
             "$unset": {
@@ -550,6 +552,11 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
         {"$set": {"status": "approved", "approved_at": now, "updated_at": now}},
     )
     return build_plan_summary(updated)
+
+
+def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
+    """Backward-compatible alias for admin_approve_waitlist_application."""
+    return admin_approve_waitlist_application(user_id)
 
 
 def admin_delete_users(user_ids: list[ObjectId]) -> dict:

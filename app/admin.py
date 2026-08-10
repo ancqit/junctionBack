@@ -16,7 +16,7 @@ from .plan_service import (
     PlanSummary,
     PlanStatus,
     PlanType,
-    admin_activate_viewer_from_waitlist,
+    admin_approve_waitlist_application,
     admin_delete_users,
     build_plan_summary,
 )
@@ -142,9 +142,9 @@ def list_users(_: Annotated[dict, Depends(require_admin)]) -> list[AdminUserReco
 
 @router.post("/users/{user_id}/activate", response_model=AdminUserRecord)
 def activate_user(user_id: str, _: Annotated[dict, Depends(require_admin)]) -> AdminUserRecord:
-    """Approve a viewer's pending waitlist application and upgrade them to owner."""
+    """Approve a pending waitlist application (owner plan change or viewer re-activation)."""
     object_id = parse_object_id(user_id, "User")
-    admin_activate_viewer_from_waitlist(object_id)
+    admin_approve_waitlist_application(object_id)
     user = users.find_one({"_id": object_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
