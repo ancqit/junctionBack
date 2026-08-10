@@ -487,6 +487,7 @@ def admin_deactivate_user_plan(user_id: ObjectId) -> PlanSummary:
         {
             "$set": {
                 "account_status": "deactivated",
+                "role": UserRole.viewer.value,
                 "plan.status": PlanStatus.deactivated.value,
                 "plan.deactivated_at": now,
                 "plan.deactivated_by": "admin",
