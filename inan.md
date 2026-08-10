@@ -127,6 +127,18 @@ Use a returned image URL with `POST /products/{id}/image/use`.
 
 ---
 
+## Product descriptions (`/descriptions`)
+
+Uses Google Gemini (`GEMINI_API_KEY`) to expand a short product summary into a detailed description.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `POST` | `/descriptions/generate` | Public | Body: `{ "text": "wireless earbuds" }`. Returns `{ "description": "..." }`. |
+
+Optional env: `GEMINI_MODEL` (default `gemini-2.0-flash`).
+
+---
+
 ## Locations (`/locations`)
 
 Dropdown data for shop city and locality fields.
@@ -169,7 +181,7 @@ Seeded with default Indian cities and localities on first request. When a user c
 | Plan | Price | Products | Notes |
 |------|-------|----------|-------|
 | Free Trial | ₹0 | 150 | 15 days full access |
-| Starter | ₹0 | 0 | Profile only |
+| Starter | ₹0 | 10 | Profile and up to 10 products |
 | Growth | ₹399 | 100 | |
 | Premium | ₹599 | 150+ | Unlimited |
 

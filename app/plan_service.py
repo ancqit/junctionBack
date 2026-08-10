@@ -42,9 +42,9 @@ PLAN_CATALOG: dict[str, dict] = {
     PlanType.starter.value: {
         "name": "Starter",
         "price_inr": 0,
-        "max_products": 0,
-        "profile_only": True,
-        "description": "Profile only",
+        "max_products": 10,
+        "profile_only": False,
+        "description": "Profile and up to 10 products",
         "duration_days": None,
     },
     PlanType.growth.value: {

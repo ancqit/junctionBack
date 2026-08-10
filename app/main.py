@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo import ReturnDocument
 from fastapi.middleware.cors import CORSMiddleware
 
+from .descriptions import router as descriptions_router
 from .database import items
 from .admin import router as admin_router
 from .digilocker import router as digilocker_router
@@ -53,6 +54,7 @@ app.include_router(products_router)
 app.include_router(employees_router)
 app.include_router(orders_router)
 app.include_router(queries_router)
+app.include_router(descriptions_router)
 app.include_router(locations_router)
 app.include_router(plans_router)
 app.include_router(plan_applications_router)
