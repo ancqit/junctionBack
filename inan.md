@@ -32,9 +32,11 @@ Authorization: Bearer <access_token>
 `user.plan` is a short plan slug for onboarding: `"free_trial"` while on an active free trial, `"starter"` after the user selects Starter via `POST /plans/select`, or `""` otherwise (Growth, Premium, expired, or not yet selected).
 
 **Role resolution on every login:**
-1. Check admin list (`ADMIN_LIST_JSON`, `ADMIN_EMAIL`, `ADMIN_PHONE`, or `admin.json`)
-2. Else check MongoDB role keeper (owner/viewer mappings)
-3. Default role: `owner`
+1. Check admin list (`ADMIN_LIST_JSON`, `ADMIN_EMAIL`, `ADMIN_PHONE`, or `admin.json`) — admins are always `admin`
+2. Else if trial or grace period has ended (`plan.viewing_applied`) → `viewer`
+3. Else → `owner`
+
+There is no deactivated state. Users are either `admin`, `owner`, or `viewer`.
 
 ---
 
@@ -202,11 +204,11 @@ Seeded with default Indian cities and localities on first request. When a user c
 |--------|----------|------|-----|
 | `GET` | `/plans` | Public | List all plans (Free Trial, Starter, Growth, Premium). Returns `{ "plans": [...] }`. |
 | `GET` | `/plans/me` | Bearer | Get current user's plan status, days remaining, grace period, etc. Admins get unlimited admin plan. |
-| `POST` | `/plans/select` | Bearer | Choose a paid plan. Body: `{ "plan_type": "growth" }`. Persists on phone-based account. |
+| `POST` | `/plans/select` | Bearer | **Owners only.** Choose a paid plan. Body: `{ "plan_type": "growth" }`. Viewers must join the waitlist instead. |
 | `POST` | `/plans/cancel` | Bearer | Cancel paid plan and enter 15-day grace period (`PLAN_GRACE_DAYS`). |
-| `GET` | `/plans/apply/preview` | Bearer | Preview plan application. Query: `plan_type`. Returns switch message if changing plans. |
-| `POST` | `/plans/apply` | Bearer | Apply for a plan. Body: `{ "plan_type": "premium", "shop_id": "..." }`. Uses shop name, city, and locality from the shop record. |
-| `GET` | `/plans/applications/me` | Bearer | Get your pending plan application, if any. |
+| `GET` | `/plans/apply/preview` | Bearer | **Viewers only.** Preview waitlist / plan application. Query: `plan_type`. |
+| `POST` | `/plans/apply` | Bearer | **Viewers only.** Join the waitlist. Body: `{ "plan_type": "premium", "shop_id": "..." }`. |
+| `GET` | `/plans/applications/me` | Bearer | Get your pending waitlist application, if any. |
 
 **Waitlist aliases** (same behavior as plan apply endpoints):
 
@@ -219,8 +221,9 @@ Seeded with default Indian cities and localities on first request. When a user c
 **Lifecycle:**
 1. **Free trial** (15 days, `owner`) → trial ends → role becomes `viewer` immediately
 2. **Starter / Growth / Premium** expires or is cancelled → **grace period** (15 days, still `owner`) → grace ends → role becomes `viewer`
-3. Admin can delete `viewer` accounts only — **shop owners can never be deleted**
-4. User can re-subscribe via `POST /plans/select` to restore `owner` access
+3. **Owners** restore access via `POST /plans/select`
+4. **Viewers** join the waitlist (`POST /waitlist` or `POST /plans/apply`); admin activates via `POST /admin/users/{id}/activate` (requires pending waitlist entry)
+5. Admin can delete `viewer` accounts only — **shop owners can never be deleted**
 
 | Plan | Price | Products | Notes |
 |------|-------|----------|-------|
@@ -252,10 +255,8 @@ All endpoints require **admin** role.
 
 | Method | Endpoint | Use |
 |--------|----------|-----|
-| `GET` | `/admin/users` | List all users with role, plan status, account status. |
-| `POST` | `/admin/users/{user_id}/activate` | Reactivate a deactivated user and restore their plan (alias). |
-| `POST` | `/admin/users/{user_id}/reactivate` | Reactivate a deactivated user, restore their previous role, active plan, and list restored activities (e.g. `create_products`, `manage_shops`). |
-| `POST` | `/admin/users/{user_id}/deactivate` | Deactivate a user account (login allowed as `viewer`). |
+| `GET` | `/admin/users` | List all users with role and plan status. |
+| `POST` | `/admin/users/{user_id}/activate` | Approve a viewer's pending waitlist application — upgrades them to `owner` with their requested plan. |
 | `PATCH` | `/admin/users/{user_id}/role` | Change user role (`owner` / `viewer`). Body: `{ "role": "viewer" }`. Admins are not set here — use admin list. |
 | `GET` | `/admin/role-keeper` | Read MongoDB role keeper (owner/viewer phone → role map). |
 | `PUT` | `/admin/role-keeper` | Update role keeper mappings. Admins cannot be added here. |
