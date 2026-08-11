@@ -156,7 +156,7 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 | `POST` | `/products/{product_id}/image/cdn` | Bearer (user) | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
 | `POST` | `/products/{product_id}/image/use` | Bearer (user) | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
 | `POST` | `/products/{product_id}/images` | Bearer (user) | Attach up to **5** chosen CDN images to the product. Body: `{ "cdns": ["https://...", "..."] }`. Replaces the gallery. |
-| `POST` | `/products/{product_id}/image/upload` | Public | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and adds to gallery (max 5). |
+| `POST` | `/products/{product_id}/image/upload` | Bearer (user) | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and adds to gallery (max 5). |
 
 **Product images:** Each product supports up to **5** images in `images[]`. The first image is also exposed as `image` / `image_cdn` (hero).
 
