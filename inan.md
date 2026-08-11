@@ -16,11 +16,12 @@ Authorization: Bearer <access_token>
 ## Security
 
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
-- **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — JWT and shop ownership checks do.
+- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`. No user login required.
+- **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — session/user JWT checks do.
 - **Shop-scoped writes/reads** require the user to own the shop (or be admin).
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
-- **Public (no JWT):** `/health`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `GET /locations/cities`, `GET /locations/localities`, `POST /locations/add-junction` (geocode-gated).
+- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
 
@@ -31,6 +32,36 @@ Authorization: Bearer <access_token>
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/health` | Public | Liveness probe. Returns `{"status":"ok"}`. Set this as the Render Health Check Path. |
+
+---
+
+## Session (`/session`) — for `junction.today`
+
+Guest security when there is no user login. Intended for the **junction.today** front end.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `POST` | `/session` | Public | Create a guest session. Returns `session_id`, `access_token` (JWT), `expires_in` (seconds), `audience` (`junction.today`). Rate-limited (`RATE_LIMIT_AUTH`). |
+
+**Response:**
+```json
+{
+  "session_id": "...",
+  "access_token": "<jwt>",
+  "token_type": "bearer",
+  "expires_in": 100,
+  "audience": "junction.today"
+}
+```
+
+**Front-end flow (`junction.today`):**
+1. `POST /session` → store `access_token`
+2. Call location APIs with `Authorization: Bearer <access_token>`
+3. When the token expires (~100s), call `POST /session` again for a new one
+
+Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
+
+Session JWTs are **not** user login tokens — they only unlock guest routes such as `/locations/*`.
 
 ---
 
@@ -203,15 +234,15 @@ Dropdown data for shop city and locality fields.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/locations/cities` | Public | List all available cities. CORS must allow the calling site (e.g. `junction.today`). |
-| `GET` | `/locations/localities?city=Mumbai` | Public | List localities for a selected city. |
-| `POST` | `/locations/add-junction` | Public (geocode) | Add a city and locality. Body: `{ "city": "...", "locality": "..." }`. **No JWT.** New places are accepted only if Nominatim can geocode them in India; otherwise `400`. Rate-limited (`RATE_LIMIT_AUTH`). Response may include `latitude` / `longitude`. |
+| `GET` | `/locations/cities` | Session JWT | List all available cities. Requires Bearer token from `POST /session` (for `junction.today`). |
+| `GET` | `/locations/localities?city=Mumbai` | Session JWT | List localities for a selected city. |
+| `POST` | `/locations/add-junction` | Session JWT + geocode | Add a city and locality. Body: `{ "city": "...", "locality": "..." }`. New places must geocode in India or `400`. Rate-limited. Response may include `latitude` / `longitude`. |
 
 Seeded with default Indian cities and localities on first request. New defaults (e.g. Ranchi) are merged in automatically on the next list call.
 
 **Adding cities/localities** (two ways):
 
-1. **`POST /locations/add-junction`** — open endpoint; geocoding must succeed for new localities.
+1. **`POST /locations/add-junction`** — requires session JWT; geocoding must succeed for new localities.
 2. **`POST /shops` / `PUT /shops/{shop_id}`** — city and locality are added automatically when a shop is created or updated (same geocode gate for **new** localities).
 
 Existing seeded/known localities skip re-geocoding.

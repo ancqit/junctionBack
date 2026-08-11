@@ -216,7 +216,14 @@ def create_access_token(user_id: ObjectId) -> str:
 def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
     error = HTTPException(status_code=401, detail="Invalid or expired access token", headers={"WWW-Authenticate": "Bearer"})
     try:
-        user_id = jwt.decode(token, _secret(), algorithms=["HS256"]).get("sub")
+        payload = jwt.decode(token, _secret(), algorithms=["HS256"])
+        if payload.get("typ") == "junction_session":
+            raise HTTPException(
+                status_code=401,
+                detail="User access token required (session tokens cannot access this route)",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_id = payload.get("sub")
         if not user_id or not ObjectId.is_valid(user_id):
             raise error
     except jwt.PyJWTError:
