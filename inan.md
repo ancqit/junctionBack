@@ -58,7 +58,7 @@ Guest security when there is no user login. Intended for the **junction.today** 
 1. `POST /session` → store `access_token`
 2. Call APIs with `Authorization: Bearer <access_token>`:
    - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
-   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/types`
+   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
 3. When the token expires (~100s), call `POST /session` again for a new one
 
@@ -131,6 +131,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 |--------|----------|------|-----|
 | `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
 | `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
+| `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
 | `POST` | `/shops` | Bearer (user) | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |

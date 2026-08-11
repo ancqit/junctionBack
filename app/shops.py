@@ -8,9 +8,10 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .access_control import ensure_shop_access
-from .database import shops
+from .database import products, shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
+from .products import Product, serialize_product
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .shop_types import SHOP_TYPES, ShopTypeInfo
@@ -270,6 +271,23 @@ def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
     if not is_junction_session(auth):
         ensure_shop_access(auth["user"], document)
     return serialize_shop(document)
+
+
+@router.get("/{shop_id}/products", response_model=list[Product])
+def list_products_for_shop(shop_id: str, auth: CatalogReader) -> list[Product]:
+    """
+    List products for one shop.
+    Flow for junction.today: /shops/by-location → select shop → /shops/{shop_id}/products.
+    """
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    if not is_junction_session(auth):
+        ensure_shop_access(auth["user"], document)
+
+    store_id = str(document["_id"])
+    documents = products.find({"store_id": store_id}).sort("created_at", -1)
+    return [serialize_product(item) for item in documents]
 
 
 @router.post("", response_model=Shop, status_code=status.HTTP_201_CREATED)
