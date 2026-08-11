@@ -20,7 +20,7 @@ Authorization: Bearer <access_token>
 - **Shop-scoped writes/reads** require the user to own the shop (or be admin).
 - **AI routes** require JWT, an active plan, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
-- **Public (no JWT):** `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
+- **Public (no JWT):** `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `GET /locations/cities`, `GET /locations/localities`, `POST /locations/add-junction` (geocode-gated).
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 
 ---
@@ -201,16 +201,18 @@ Dropdown data for shop city and locality fields.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/locations/cities` | Public | List all available cities. |
+| `GET` | `/locations/cities` | Public | List all available cities. CORS must allow the calling site (e.g. `junction.today`). |
 | `GET` | `/locations/localities?city=Mumbai` | Public | List localities for a selected city. |
-| `POST` | `/locations/add-junction` | Bearer | Add a city and locality to the lists. Body: `{ "city": "...", "locality": "..." }`. |
+| `POST` | `/locations/add-junction` | Public (geocode) | Add a city and locality. Body: `{ "city": "...", "locality": "..." }`. **No JWT.** New places are accepted only if Nominatim can geocode them in India; otherwise `400`. Rate-limited (`RATE_LIMIT_AUTH`). Response may include `latitude` / `longitude`. |
 
 Seeded with default Indian cities and localities on first request. New defaults (e.g. Ranchi) are merged in automatically on the next list call.
 
 **Adding cities/localities** (two ways):
 
-1. **`POST /locations/add-junction`** — user submits `city` and `locality` directly.
-2. **`POST /shops` / `PUT /shops/{shop_id}`** — city and locality are added automatically when a shop is created or updated.
+1. **`POST /locations/add-junction`** — open endpoint; geocoding must succeed for new localities.
+2. **`POST /shops` / `PUT /shops/{shop_id}`** — city and locality are added automatically when a shop is created or updated (same geocode gate for **new** localities).
+
+Existing seeded/known localities skip re-geocoding.
 
 ---
 

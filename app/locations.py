@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from .access_control import AuthenticatedUser
 from .database import cities, localities
+from .geocoding import GeocodeResult, geocode_city_locality
+from .rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter(prefix="/locations", tags=["locations"])
 
@@ -67,6 +68,8 @@ class AddJunctionRequest(BaseModel):
 class AddJunctionResponse(BaseModel):
     city: str
     locality: str
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 def _normalize(value: str) -> str:
@@ -115,7 +118,8 @@ def seed_locations_if_empty() -> None:
 
 
 @router.get("/cities", response_model=CityListResponse)
-def list_cities(_: AuthenticatedUser) -> CityListResponse:
+def list_cities() -> CityListResponse:
+    """Public: city dropdown for junction.today and other CORS-allowed fronts."""
     seed_locations_if_empty()
     names = [document["name"] for document in cities.find().sort("name", 1)]
     return CityListResponse(cities=names)
@@ -123,9 +127,9 @@ def list_cities(_: AuthenticatedUser) -> CityListResponse:
 
 @router.get("/localities", response_model=LocalityListResponse)
 def list_localities(
-    _: AuthenticatedUser,
     city: str = Query(..., min_length=1, max_length=80),
 ) -> LocalityListResponse:
+    """Public: locality dropdown for a city."""
     seed_locations_if_empty()
     city_name = _normalize(city)
     if not city_name:
@@ -142,17 +146,31 @@ def list_localities(
 
 
 @router.post("/add-junction", response_model=AddJunctionResponse, status_code=status.HTTP_201_CREATED)
-def add_junction(
-    payload: AddJunctionRequest,
-    _: AuthenticatedUser,
-) -> AddJunctionResponse:
-    """Add a city and locality to the dropdown lists (same data as shop create/update)."""
-    city, locality = ensure_city_and_locality(payload.city, payload.locality)
-    return AddJunctionResponse(city=city, locality=locality)
+@limiter.limit(RATE_LIMIT_AUTH)
+def add_junction(request: Request, payload: AddJunctionRequest) -> AddJunctionResponse:
+    """
+    Public: add a city and locality after geocoding succeeds.
+    Fake / unresolvable places are rejected.
+    """
+    city, locality, geo = ensure_city_and_locality(payload.city, payload.locality, return_geo=True)
+    return AddJunctionResponse(
+        city=city,
+        locality=locality,
+        latitude=geo.latitude if geo else None,
+        longitude=geo.longitude if geo else None,
+    )
 
 
-def ensure_city_and_locality(city: str, locality: str) -> tuple[str, str]:
-    """Normalize city/locality and add them to the dropdown lists if they are new."""
+def ensure_city_and_locality(
+    city: str,
+    locality: str,
+    *,
+    return_geo: bool = False,
+) -> tuple[str, str] | tuple[str, str, GeocodeResult | None]:
+    """
+    Normalize city/locality and add them if new.
+    New localities must geocode successfully; existing ones are accepted as-is.
+    """
     seed_locations_if_empty()
     cities.create_index("name", unique=True)
     localities.create_index([("city", 1), ("name", 1)], unique=True)
@@ -162,15 +180,36 @@ def ensure_city_and_locality(city: str, locality: str) -> tuple[str, str]:
     if not city_name or not locality_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city and locality are required")
 
+    existing = localities.find_one({"city": city_name, "name": locality_name})
+    geo: GeocodeResult | None = None
+    if existing is None:
+        geo = geocode_city_locality(city_name, locality_name)
+    elif return_geo and existing.get("latitude") is not None and existing.get("longitude") is not None:
+        geo = GeocodeResult(
+            latitude=float(existing["latitude"]),
+            longitude=float(existing["longitude"]),
+            display_name=str(existing.get("display_name") or f"{locality_name}, {city_name}"),
+        )
+
     now = datetime.now(timezone.utc)
     cities.update_one(
         {"name": city_name},
         {"$setOnInsert": {"name": city_name, "created_at": now}},
         upsert=True,
     )
+
+    locality_doc: dict = {"city": city_name, "name": locality_name, "created_at": now}
+    if geo is not None:
+        locality_doc["latitude"] = geo.latitude
+        locality_doc["longitude"] = geo.longitude
+        locality_doc["display_name"] = geo.display_name
+
     localities.update_one(
         {"city": city_name, "name": locality_name},
-        {"$setOnInsert": {"city": city_name, "name": locality_name, "created_at": now}},
+        {"$setOnInsert": locality_doc},
         upsert=True,
     )
+
+    if return_geo:
+        return city_name, locality_name, geo
     return city_name, locality_name
