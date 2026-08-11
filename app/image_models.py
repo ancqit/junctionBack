@@ -8,6 +8,6 @@ class ImageResult(BaseModel):
     alt: str
     width: int = Field(ge=1)
     height: int = Field(ge=1)
-    source: str = "gemini"
+    source: str = "pexels"
     photographer: str | None = None
     photographer_url: HttpUrl | None = None

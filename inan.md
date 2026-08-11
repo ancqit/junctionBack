@@ -18,7 +18,7 @@ Authorization: Bearer <access_token>
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
 - **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — JWT and shop ownership checks do.
 - **Shop-scoped writes/reads** require the user to own the shop (or be admin).
-- **AI routes** require JWT, an active plan, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
+- **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Public (no JWT):** `/health`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `GET /locations/cities`, `GET /locations/localities`, `POST /locations/add-junction` (geocode-gated).
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
@@ -116,7 +116,7 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 | `POST` | `/products` | Bearer | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
 | `PUT` | `/products/{product_id}` | Public | Update product fields (name, price, stock, status, image, etc.). |
 | `DELETE` | `/products/{product_id}` | Public | Delete a product. |
-| `POST` | `/products/images/suggest` | Public | Suggest **10** Gemini-generated CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. |
+| `POST` | `/products/images/suggest` | Bearer | Suggest up to **10** Pexels CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. Requires active plan. |
 | `GET` | `/products/images/{stored_image_id}` | Public | Serve a stored product image (from upload or query flow). |
 | `POST` | `/products/{product_id}/image/cdn` | Public | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
 | `POST` | `/products/{product_id}/image/use` | Public | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
@@ -126,7 +126,7 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 **Product images:** Each product supports up to **5** images in `images[]`. The first image is also exposed as `image` / `image_cdn` (hero).
 
 **Suggested image flow:**
-1. `GET /queries?query=wireless+earbuds&per_page=10` or `POST /products/images/suggest` → get **10** generated CDN options
+1. `GET /queries?query=wireless+earbuds&per_page=10` or `POST /products/images/suggest` → get up to **10** Pexels CDN options
 2. User picks up to **5** → `POST /products/{product_id}/images` with `{ "cdns": ["...", "..."] }`
 3. Or add one at a time via `/image/use` or `/image/upload`
 
@@ -162,48 +162,38 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 
 ## Image search / Queries (`/queries`)
 
-Pexels-style API powered by **Gemini image generation**. Pass a product keyword and receive generated product photos with CDN URLs served by this backend.
+Search **Pexels** for stock product photos. Pass a keyword and receive CDN image URLs (requires `PEXELS_API_KEY`).
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/queries` | Public | Generate images from a keyword. Query: `query`, `page`, `per_page` (max 10). |
-| `POST` | `/queries` | Public | Same via body: `{ "query": "wireless earbuds", "page": 1, "per_page": 10 }`. |
-| `POST` | `/queries/suggest-images` | Public | Alias that returns **10** generated options. Body: `{ "product_name": "wireless earbuds" }`. Prefer `POST /products/images/suggest`. |
+| `GET` | `/queries` | Bearer | Search images. Query: `query`, `page`, `per_page` (max 80). Active plan required. |
+| `POST` | `/queries` | Bearer | Same via body: `{ "query": "wireless earbuds", "page": 1, "per_page": 10 }`. |
+| `POST` | `/queries/suggest-images` | Bearer | Alias that returns up to **10** Pexels options. Body: `{ "product_name": "wireless earbuds" }`. Prefer `POST /products/images/suggest`. |
 
-**Response shape (like Pexels):**
+**Response shape:**
 ```json
 {
   "query": "wireless earbuds",
   "page": 1,
   "per_page": 10,
-  "total_results": 10,
+  "total_results": 8000,
   "images": [
     {
-      "id": "...",
-      "cdn_url": "https://junctionback.onrender.com/products/images/...",
-      "thumbnail_url": "https://junctionback.onrender.com/products/images/...",
-      "alt": "wireless earbuds - front view ...",
-      "width": 1024,
-      "height": 1024,
-      "source": "gemini"
+      "id": "123",
+      "cdn_url": "https://images.pexels.com/...",
+      "thumbnail_url": "https://images.pexels.com/...",
+      "alt": "...",
+      "width": 1920,
+      "height": 1280,
+      "source": "pexels",
+      "photographer": "...",
+      "photographer_url": "https://www.pexels.com/..."
     }
   ]
 }
 ```
 
-Requires `GEMINI_API_KEY`. Optional: `GEMINI_MODEL` (default `gemini-3-pro-image`) — same model for images and descriptions.
-
----
-
-## Product descriptions (`/descriptions`)
-
-Uses Google Gemini (`GEMINI_API_KEY`) to expand a short product summary into a detailed description.
-
-| Method | Endpoint | Auth | Use |
-|--------|----------|------|-----|
-| `POST` | `/descriptions/generate` | Public | Body: `{ "text": "wireless earbuds" }`. Returns `{ "description": "..." }`. |
-
-Optional env: `GEMINI_MODEL` (default `gemini-3-pro-image`) — shared with product image generation.
+Requires `PEXELS_API_KEY` on the server.
 
 ---
 
