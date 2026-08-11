@@ -13,6 +13,16 @@ Authorization: Bearer <access_token>
 
 **`store_id`** on products, employees, and orders = the **shop ID** from `/shops`.
 
+## Security
+
+- **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
+- **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — JWT and shop ownership checks do.
+- **Shop-scoped writes/reads** require the user to own the shop (or be admin).
+- **AI routes** require JWT, an active plan, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
+- **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
+- **Public (no JWT):** `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
+- Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
+
 ---
 
 ## Authentication (`/auth`)

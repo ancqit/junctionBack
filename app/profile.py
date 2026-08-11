@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_vali
 from pymongo import ReturnDocument
 
 from .database import notices, shops, users
+from .access_control import AuthenticatedUser, require_store_access
 from .login import get_current_user
 from .roles import UserRole, get_user_role
 from .shops import ensure_shop_access
@@ -154,8 +155,10 @@ def post_today_notice(
 
 @notices_router.get("/today", response_model=Notice)
 def get_today_notice(
+    current_user: Annotated[dict, Depends(get_current_user)],
     store_id: Annotated[str, Query(min_length=1, max_length=80)],
 ) -> Notice:
+    require_store_access(current_user, store_id)
     notice_date = today_utc().isoformat()
     document = notices.find_one({"store_id": store_id, "notice_date": notice_date})
     if document is None:

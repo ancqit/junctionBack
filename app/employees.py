@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_vali
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from .access_control import (
+    AuthenticatedUser,
+    apply_store_filter,
+    require_employee_access,
+    require_store_access,
+)
 from .database import employees
 from .utils import parse_object_id
 
@@ -160,13 +166,13 @@ def serialize_employee(document: dict) -> Employee:
 
 @router.get("", response_model=list[Employee])
 def list_employees(
+    current_user: AuthenticatedUser,
     store_id: str | None = Query(default=None, min_length=1, max_length=80),
     status: EmploymentStatus | None = None,
     department: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> list[Employee]:
     query: dict = {}
-    if store_id:
-        query["store_id"] = store_id
+    apply_store_filter(query, current_user, store_id)
     if status:
         query["status"] = status.value
     if department:
@@ -176,7 +182,8 @@ def list_employees(
 
 
 @router.post("", response_model=Employee, status_code=status.HTTP_201_CREATED)
-def create_employee(payload: EmployeeCreate) -> Employee:
+def create_employee(payload: EmployeeCreate, current_user: AuthenticatedUser) -> Employee:
+    require_store_access(current_user, payload.store_id)
     employees.create_index([("store_id", 1), ("employee_code", 1)], unique=True)
     if payload.manager_id is not None:
         manager = employees.find_one({"_id": parse_object_id(payload.manager_id, "Employee")})
@@ -194,7 +201,8 @@ def create_employee(payload: EmployeeCreate) -> Employee:
 
 
 @router.put("/{employee_id}", response_model=Employee)
-def update_employee(employee_id: str, payload: EmployeeUpdate) -> Employee:
+def update_employee(employee_id: str, payload: EmployeeUpdate, current_user: AuthenticatedUser) -> Employee:
+    require_employee_access(current_user, employee_id)
     changes = payload.model_dump(exclude_unset=True, mode="json")
     if not changes:
         raise HTTPException(status_code=400, detail="Provide at least one field to update")
@@ -228,7 +236,8 @@ def update_employee(employee_id: str, payload: EmployeeUpdate) -> Employee:
 
 
 @router.delete("/{employee_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_employee(employee_id: str) -> Response:
+def delete_employee(employee_id: str, current_user: AuthenticatedUser) -> Response:
+    require_employee_access(current_user, employee_id)
     result = employees.delete_one({"_id": parse_object_id(employee_id, "Employee")})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Employee not found")

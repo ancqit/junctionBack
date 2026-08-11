@@ -9,7 +9,7 @@ from typing import Annotated
 import jwt
 import httpx
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo import ReturnDocument
@@ -18,6 +18,7 @@ from pymongo.errors import DuplicateKeyError
 from .admin_registry import is_admin_user
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, resolve_login_plan_string, restore_persisted_plan
+from .rate_limit import RATE_LIMIT_AUTH, limiter
 from .role_keeper import resolve_role_from_keeper
 from .roles import UserRole, get_user_role
 
@@ -243,7 +244,8 @@ def read_current_session(current_user: Annotated[dict, Depends(get_current_user)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest) -> TokenResponse:
+@limiter.limit(RATE_LIMIT_AUTH)
+def register(request: Request, payload: RegisterRequest) -> TokenResponse:
     email = str(payload.email).lower()
     users.create_index("email", unique=True, sparse=True)
     if users.find_one({"email": email}) is not None:
@@ -272,7 +274,8 @@ def register(payload: RegisterRequest) -> TokenResponse:
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> TokenResponse:
+@limiter.limit(RATE_LIMIT_AUTH)
+def login(request: Request, form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> TokenResponse:
     user = users.find_one({"email": form.username.lower()})
     if user is None or not verify_password(form.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password", headers={"WWW-Authenticate": "Bearer"})
@@ -286,7 +289,8 @@ def refresh(token: Annotated[str, Depends(oauth2_scheme)]) -> TokenResponse:
 
 
 @router.post("/otp/request", response_model=OtpRequestResponse)
-def request_otp(payload: OtpRequest) -> OtpRequestResponse:
+@limiter.limit(RATE_LIMIT_AUTH)
+def request_otp(request: Request, payload: OtpRequest) -> OtpRequestResponse:
     require_gcp_otp_configuration()
     try:
         response = httpx.post(

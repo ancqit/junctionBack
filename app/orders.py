@@ -6,6 +6,12 @@ import secrets
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from .access_control import (
+    AuthenticatedUser,
+    apply_store_filter,
+    require_order_access,
+    require_store_access,
+)
 from .database import orders
 from .utils import parse_object_id
 
@@ -179,23 +185,28 @@ def build_list_query(
 
 @router.get("", response_model=list[Order])
 def list_orders(
+    current_user: AuthenticatedUser,
     store_id: str | None = Query(default=None, min_length=1, max_length=80),
     customer_name: str | None = Query(default=None, min_length=1, max_length=160),
     status: OrderStatus | None = None,
 ) -> list[Order]:
-    documents = orders.find(build_list_query(store_id, customer_name, status)).sort("created_at", -1)
+    query = build_list_query(store_id, customer_name, status)
+    apply_store_filter(query, current_user, store_id)
+    documents = orders.find(query).sort("created_at", -1)
     return [serialize_order(document) for document in documents]
 
 
 @router.get("/by-name/{customer_name}", response_model=list[Order])
 def get_orders_by_name(
     customer_name: str,
+    current_user: AuthenticatedUser,
     store_id: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> list[Order]:
     name = customer_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="customer_name must not be blank")
     query = build_list_query(store_id, name, None)
+    apply_store_filter(query, current_user, store_id)
     documents = orders.find(query).sort("created_at", -1)
     results = [serialize_order(document) for document in documents]
     if not results:
@@ -204,15 +215,14 @@ def get_orders_by_name(
 
 
 @router.get("/{order_id}", response_model=Order)
-def get_order(order_id: str) -> Order:
-    document = orders.find_one({"_id": parse_object_id(order_id, "Order")})
-    if document is None:
-        raise HTTPException(status_code=404, detail="Order not found")
+def get_order(order_id: str, current_user: AuthenticatedUser) -> Order:
+    document = require_order_access(current_user, order_id)
     return serialize_order(document)
 
 
 @router.post("", response_model=Order, status_code=status.HTTP_201_CREATED)
-def create_order(payload: OrderCreate) -> Order:
+def create_order(payload: OrderCreate, current_user: AuthenticatedUser) -> Order:
+    require_store_access(current_user, payload.store_id)
     orders.create_index("order_number", unique=True)
     orders.create_index([("store_id", 1), ("customer_name", 1)])
 
@@ -230,7 +240,8 @@ def create_order(payload: OrderCreate) -> Order:
 
 
 @router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_order(order_id: str) -> Response:
+def delete_order(order_id: str, current_user: AuthenticatedUser) -> Response:
+    require_order_access(current_user, order_id)
     result = orders.delete_one({"_id": parse_object_id(order_id, "Order")})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Order not found")

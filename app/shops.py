@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from .access_control import AuthenticatedUser
 from .database import shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
@@ -106,7 +107,7 @@ def get_user_phone_number(user: dict) -> str:
 
 
 @router.get("/types", response_model=list[ShopTypeInfo])
-def list_shop_types() -> list[ShopTypeInfo]:
+def list_shop_types(_: AuthenticatedUser) -> list[ShopTypeInfo]:
     return SHOP_TYPES
 
 
