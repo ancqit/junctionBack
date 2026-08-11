@@ -6,7 +6,7 @@ import httpx
 from fastapi import HTTPException, status
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -41,7 +41,7 @@ def extract_gemini_text(payload: dict) -> str:
 
 def generate_text(prompt: str) -> str:
     api_key = require_gemini_configuration()
-    model = GEMINI_MODEL.strip() or "gemini-2.0-flash"
+    model = GEMINI_MODEL.strip() or "gemini-2.5-flash"
 
     try:
         response = httpx.post(

@@ -169,7 +169,7 @@ Pexels-style API powered by **Gemini image generation**. Pass a product keyword 
 }
 ```
 
-Requires `GEMINI_API_KEY`. Optional: `GEMINI_IMAGE_MODEL` (default `gemini-2.0-flash-preview-image-generation`).
+Requires `GEMINI_API_KEY`. Optional: `GEMINI_IMAGE_MODEL` (default `gemini-2.5-flash-image`).
 
 ---
 
@@ -181,7 +181,7 @@ Uses Google Gemini (`GEMINI_API_KEY`) to expand a short product summary into a d
 |--------|----------|------|-----|
 | `POST` | `/descriptions/generate` | Public | Body: `{ "text": "wireless earbuds" }`. Returns `{ "description": "..." }`. |
 
-Optional env: `GEMINI_MODEL` (default `gemini-2.0-flash`).
+Optional env: `GEMINI_MODEL` (default `gemini-2.5-flash`).
 
 ---
 

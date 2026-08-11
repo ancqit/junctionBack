@@ -9,7 +9,7 @@ from .gemini import require_gemini_configuration
 from .image_models import ImageResult
 from .product_images import save_product_image
 
-GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 MAX_GENERATED_IMAGES_PER_REQUEST = 10
 DEFAULT_IMAGE_WIDTH = 1024
@@ -56,7 +56,7 @@ def extract_gemini_image(payload: dict) -> tuple[bytes, str]:
 
 def generate_image_bytes(prompt: str) -> tuple[bytes, str]:
     api_key = require_gemini_configuration()
-    model = GEMINI_IMAGE_MODEL.strip() or "gemini-2.0-flash-preview-image-generation"
+    model = GEMINI_IMAGE_MODEL.strip() or "gemini-2.5-flash-image"
 
     try:
         response = httpx.post(
