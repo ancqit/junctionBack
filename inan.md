@@ -193,10 +193,14 @@ Dropdown data for shop city and locality fields.
 |--------|----------|------|-----|
 | `GET` | `/locations/cities` | Public | List all available cities. |
 | `GET` | `/locations/localities?city=Mumbai` | Public | List localities for a selected city. |
+| `POST` | `/locations/add-junction` | Bearer | Add a city and locality to the lists. Body: `{ "city": "...", "locality": "..." }`. |
 
 Seeded with default Indian cities and localities on first request. New defaults (e.g. Ranchi) are merged in automatically on the next list call.
 
-**Adding cities/localities:** there is no separate `POST /locations/...` endpoint. New values are added when a shop is created or updated (`POST /shops`, `PUT /shops/{shop_id}`) with a city/locality not already in the list.
+**Adding cities/localities** (two ways):
+
+1. **`POST /locations/add-junction`** — user submits `city` and `locality` directly.
+2. **`POST /shops` / `PUT /shops/{shop_id}`** — city and locality are added automatically when a shop is created or updated.
 
 ---
 
