@@ -89,10 +89,13 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `GET` | `/shops` | Bearer | List shops. Owners see their own; admins see all. |
 | `GET` | `/shops/{shop_id}` | Bearer | Get one shop by ID. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer | Find shop(s) by name (case-insensitive). |
-| `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "..." }` (all required). Phone from logged-in user and **cannot be changed later**. |
-| `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, and/or `locality`. |
+| `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |
+| `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
+| `PUT` | `/shops/open-status` | Bearer | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer | Delete a shop. |
 | `GET` | `/shops/types` | Public | List all shop/business types as a JSON array. Each item has `value`, `label`, `category` (`retail`, `food`, `beverage`, `services`, etc.), optional `group` (e.g. `technician`, `home_maintenance` under services), and `description`. |
+
+Shop responses include `open_time`, `closed_time`, and `is_open` so the front end can show hours and current open/closed state without recomputing.
 
 ---
 
