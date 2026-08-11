@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
 from .database import cities, localities
+from .login import get_current_user
 
 router = APIRouter(prefix="/locations", tags=["locations"])
 
@@ -56,6 +58,16 @@ class CityListResponse(BaseModel):
 class LocalityListResponse(BaseModel):
     city: str
     localities: list[str]
+
+
+class AddJunctionRequest(BaseModel):
+    city: str = Field(min_length=1, max_length=80)
+    locality: str = Field(min_length=1, max_length=120)
+
+
+class AddJunctionResponse(BaseModel):
+    city: str
+    locality: str
 
 
 def _normalize(value: str) -> str:
@@ -125,6 +137,16 @@ def list_localities(city: str = Query(..., min_length=1, max_length=80)) -> Loca
         for document in localities.find({"city": city_name}).sort("name", 1)
     ]
     return LocalityListResponse(city=city_name, localities=names)
+
+
+@router.post("/add-junction", response_model=AddJunctionResponse, status_code=status.HTTP_201_CREATED)
+def add_junction(
+    payload: AddJunctionRequest,
+    _: Annotated[dict, Depends(get_current_user)],
+) -> AddJunctionResponse:
+    """Add a city and locality to the dropdown lists (same data as shop create/update)."""
+    city, locality = ensure_city_and_locality(payload.city, payload.locality)
+    return AddJunctionResponse(city=city, locality=locality)
 
 
 def ensure_city_and_locality(city: str, locality: str) -> tuple[str, str]:
