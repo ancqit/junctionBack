@@ -1,25 +1,19 @@
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from .access_control import AuthenticatedUser
-from .gemini_images import (
-    MAX_GENERATED_IMAGES_PER_REQUEST,
-    PRODUCT_IMAGE_STYLES,
-    generate_product_images,
-)
 from .image_models import ImageResult
+from .pexels import DEFAULT_SUGGESTED_IMAGE_COUNT, MAX_PEXELS_PER_PAGE, search_pexels_images
 from .plan_service import require_active_plan
 from .rate_limit import RATE_LIMIT_AI, limiter
 
 router = APIRouter(prefix="/queries", tags=["queries"])
 
-DEFAULT_SUGGESTED_IMAGE_COUNT = 10
-
 
 class QuerySearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=200)
     page: int = Field(default=1, ge=1, le=100)
-    per_page: int = Field(default=10, ge=1, le=MAX_GENERATED_IMAGES_PER_REQUEST)
+    per_page: int = Field(default=10, ge=1, le=MAX_PEXELS_PER_PAGE)
 
     @field_validator("query")
     @classmethod
@@ -52,7 +46,7 @@ class ProductImageSuggestRequest(BaseModel):
 
 class ProductImageSuggestResponse(BaseModel):
     product_name: str
-    styles: list[str]
+    styles: list[str] = Field(default_factory=list)
     images: list[ImageResult]
 
 
@@ -64,19 +58,13 @@ def request_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def build_query_search_response(
-    *,
-    query: str,
-    page: int,
-    per_page: int,
-    base_url: str,
-) -> QuerySearchResponse:
-    images = generate_product_images(query, per_page, base_url)
+def build_query_search_response(*, query: str, page: int, per_page: int) -> QuerySearchResponse:
+    total_results, images = search_pexels_images(query, page, per_page)
     return QuerySearchResponse(
         query=query,
         page=page,
         per_page=per_page,
-        total_results=len(images),
+        total_results=total_results,
         images=images,
     )
 
@@ -85,18 +73,19 @@ def collect_suggested_images(
     product_name: str,
     *,
     count: int = DEFAULT_SUGGESTED_IMAGE_COUNT,
-    base_url: str,
+    base_url: str | None = None,
 ) -> ProductImageSuggestResponse:
+    """Suggest product images via Pexels search (base_url kept for call-site compatibility)."""
+    del base_url  # Pexels returns external CDN URLs; no local base URL needed.
     cleaned_name = product_name.strip()
     if not cleaned_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="product_name must not be blank")
 
-    image_count = min(max(count, 1), MAX_GENERATED_IMAGES_PER_REQUEST)
-    styles = [PRODUCT_IMAGE_STYLES[index % len(PRODUCT_IMAGE_STYLES)] for index in range(image_count)]
-    images = generate_product_images(cleaned_name, image_count, base_url)
+    image_count = min(max(count, 1), DEFAULT_SUGGESTED_IMAGE_COUNT)
+    _, images = search_pexels_images(cleaned_name, page=1, per_page=image_count)
     return ProductImageSuggestResponse(
         product_name=cleaned_name,
-        styles=styles[: len(images)],
+        styles=[],
         images=images,
     )
 
@@ -108,18 +97,13 @@ def search_images(
     current_user: AuthenticatedUser,
     query: str = Query(min_length=1, max_length=200),
     page: int = Query(default=1, ge=1, le=100),
-    per_page: int = Query(default=10, ge=1, le=MAX_GENERATED_IMAGES_PER_REQUEST),
+    per_page: int = Query(default=10, ge=1, le=MAX_PEXELS_PER_PAGE),
 ) -> QuerySearchResponse:
     require_active_plan(current_user)
     cleaned_query = query.strip()
     if not cleaned_query:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="query must not be blank")
-    return build_query_search_response(
-        query=cleaned_query,
-        page=page,
-        per_page=per_page,
-        base_url=request_base_url(request),
-    )
+    return build_query_search_response(query=cleaned_query, page=page, per_page=per_page)
 
 
 @router.post("", response_model=QuerySearchResponse, status_code=status.HTTP_200_OK)
@@ -134,7 +118,6 @@ def search_images_post(
         query=payload.query,
         page=payload.page,
         per_page=payload.per_page,
-        base_url=request_base_url(request),
     )
 
 
@@ -146,4 +129,4 @@ def suggest_product_images(
     current_user: AuthenticatedUser,
 ) -> ProductImageSuggestResponse:
     require_active_plan(current_user)
-    return collect_suggested_images(payload.product_name, base_url=request_base_url(request))
+    return collect_suggested_images(payload.product_name)

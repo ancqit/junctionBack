@@ -44,7 +44,8 @@ class ProductImageSource(str, Enum):
     cdn = "cdn"
     query = "query"
     upload = "upload"
-    gemini = "gemini"
+    pexels = "pexels"
+    gemini = "gemini"  # legacy stored images from former Gemini flow
 
 
 class ProductImage(BaseModel):
@@ -300,7 +301,7 @@ async def product_image_from_cdn_url(
     match = INTERNAL_IMAGE_CDN_PATTERN.search(cdn_url)
     if match:
         return ProductImage(
-            source=ProductImageSource.gemini,
+            source=ProductImageSource.query,
             cdn=cdn_url,
             stored_image_id=match.group(1),
         )
