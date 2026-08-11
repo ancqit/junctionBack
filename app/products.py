@@ -16,7 +16,7 @@ from .access_control import (
     require_product_access,
     require_store_access,
 )
-from .database import products
+from .database import products, shops
 from .plan_service import ensure_can_add_product, require_active_plan
 from .product_images import (
     delete_product_image,
@@ -27,6 +27,7 @@ from .product_images import (
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
 from .rate_limit import RATE_LIMIT_AI, limiter
+from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
@@ -379,6 +380,42 @@ def list_products(
     else:
         apply_store_filter(query, auth["user"], store_id)
     documents = products.find(query).sort("created_at", -1)
+    return [serialize_product(document) for document in documents]
+
+
+@router.get("/by-location", response_model=list[Product])
+def list_products_by_location(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    locality: str = Query(..., min_length=1, max_length=120),
+) -> list[Product]:
+    """
+    List products for shops in a city + locality.
+    Intended for junction.today (session JWT); also works with owner/admin user JWT.
+    """
+    city_name = city.strip()
+    locality_name = locality.strip()
+    if not city_name or not locality_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="city and locality are required",
+        )
+
+    shop_query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+        "locality": {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"},
+    }
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            shop_query["owner_user_id"] = str(current_user["_id"])
+
+    store_ids = [str(shop["_id"]) for shop in shops.find(shop_query, {"_id": 1})]
+    if not store_ids:
+        return []
+
+    documents = products.find({"store_id": {"$in": store_ids}}).sort("created_at", -1)
     return [serialize_product(document) for document in documents]
 
 

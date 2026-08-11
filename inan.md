@@ -58,8 +58,8 @@ Guest security when there is no user login. Intended for the **junction.today** 
 1. `POST /session` → store `access_token`
 2. Call APIs with `Authorization: Bearer <access_token>`:
    - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
-   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/types`
-   - Products (read): `/products`, `/products/{id}`, `/products/images/{stored_image_id}`
+   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/types`
+   - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
 3. When the token expires (~100s), call `POST /session` again for a new one
 
 Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
@@ -132,6 +132,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
 | `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
+| `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
 | `POST` | `/shops` | Bearer (user) | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |
 | `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
 | `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
@@ -147,6 +148,7 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/products` | Bearer (user **or** session) | List products. Optional `store_id`. Owner JWT is shop-scoped; `junction.today` session sees the public catalog. |
+| `GET` | `/products/by-location` | Bearer (user **or** session) | List products for shops in a location. Query: `city`, `locality` (both required). |
 | `GET` | `/products/{product_id}` | Bearer (user **or** session) | Get one product by ID. |
 | `POST` | `/products` | Bearer (user) | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
 | `PUT` | `/products/{product_id}` | Bearer (user) | Update product fields (name, price, stock, status, image, etc.). |

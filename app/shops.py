@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -211,6 +211,38 @@ def get_shops_by_name(shop_name: str, auth: CatalogReader) -> list[Shop]:
     documents = list(shops.find(query).sort("created_at", -1))
     if not documents:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No shops found with this name")
+    return [serialize_shop(document) for document in documents]
+
+
+@router.get("/by-location", response_model=list[Shop])
+def list_shops_by_location(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    locality: str = Query(..., min_length=1, max_length=120),
+) -> list[Shop]:
+    """
+    List shops in a city + locality.
+    Intended for junction.today (session JWT); also works with owner/admin user JWT.
+    """
+    city_name = city.strip()
+    locality_name = locality.strip()
+    if not city_name or not locality_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="city and locality are required",
+        )
+
+    query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+        "locality": {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"},
+    }
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            query["owner_user_id"] = str(current_user["_id"])
+
+    documents = shops.find(query).sort("created_at", -1)
     return [serialize_shop(document) for document in documents]
 
 
