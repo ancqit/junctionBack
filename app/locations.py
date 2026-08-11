@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from .database import cities, localities
 from .geocoding import GeocodeResult, geocode_city_locality
 from .rate_limit import RATE_LIMIT_AUTH, limiter
+from .session import JunctionSession
 
 router = APIRouter(prefix="/locations", tags=["locations"])
 
@@ -118,8 +119,8 @@ def seed_locations_if_empty() -> None:
 
 
 @router.get("/cities", response_model=CityListResponse)
-def list_cities() -> CityListResponse:
-    """Public: city dropdown for junction.today and other CORS-allowed fronts."""
+def list_cities(_: JunctionSession) -> CityListResponse:
+    """City dropdown for junction.today — requires a valid /session JWT."""
     seed_locations_if_empty()
     names = [document["name"] for document in cities.find().sort("name", 1)]
     return CityListResponse(cities=names)
@@ -127,9 +128,10 @@ def list_cities() -> CityListResponse:
 
 @router.get("/localities", response_model=LocalityListResponse)
 def list_localities(
+    _: JunctionSession,
     city: str = Query(..., min_length=1, max_length=80),
 ) -> LocalityListResponse:
-    """Public: locality dropdown for a city."""
+    """Locality dropdown for a city — requires a valid /session JWT."""
     seed_locations_if_empty()
     city_name = _normalize(city)
     if not city_name:
@@ -147,10 +149,14 @@ def list_localities(
 
 @router.post("/add-junction", response_model=AddJunctionResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(RATE_LIMIT_AUTH)
-def add_junction(request: Request, payload: AddJunctionRequest) -> AddJunctionResponse:
+def add_junction(
+    request: Request,
+    payload: AddJunctionRequest,
+    _: JunctionSession,
+) -> AddJunctionResponse:
     """
-    Public: add a city and locality after geocoding succeeds.
-    Fake / unresolvable places are rejected.
+    Add a city and locality after geocoding succeeds.
+    Requires a valid /session JWT (junction.today guest session).
     """
     city, locality, geo = ensure_city_and_locality(payload.city, payload.locality, return_geo=True)
     return AddJunctionResponse(
