@@ -73,6 +73,12 @@ app.include_router(admin_router)
 app.include_router(shops_router)
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness probe for Render / load balancers. No auth. Prefer this over /docs."""
+    return {"status": "ok"}
+
+
 class ItemCreate(BaseModel):
     store_id: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=120)
