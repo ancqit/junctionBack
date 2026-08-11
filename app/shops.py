@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .access_control import AuthenticatedUser
+from .access_control import AuthenticatedUser, ensure_shop_access
 from .database import shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
@@ -134,14 +134,6 @@ def serialize_shop(document: dict) -> Shop:
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
-
-
-def ensure_shop_access(user: dict, shop: dict) -> None:
-    role = get_user_role(user)
-    if role == UserRole.admin:
-        return
-    if str(shop.get("owner_user_id")) != str(user["_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this shop")
 
 
 def get_user_phone_number(user: dict) -> str:

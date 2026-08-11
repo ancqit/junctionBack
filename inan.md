@@ -20,8 +20,17 @@ Authorization: Bearer <access_token>
 - **Shop-scoped writes/reads** require the user to own the shop (or be admin).
 - **AI routes** require JWT, an active plan, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
-- **Public (no JWT):** `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `GET /locations/cities`, `GET /locations/localities`, `POST /locations/add-junction` (geocode-gated).
+- **Public (no JWT):** `/health`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `GET /locations/cities`, `GET /locations/localities`, `POST /locations/add-junction` (geocode-gated).
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
+- **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
+
+---
+
+## Health
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/health` | Public | Liveness probe. Returns `{"status":"ok"}`. Set this as the Render Health Check Path. |
 
 ---
 
