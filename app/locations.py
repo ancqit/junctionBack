@@ -1,11 +1,10 @@
 from datetime import datetime, timezone
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from .access_control import AuthenticatedUser
 from .database import cities, localities
-from .login import get_current_user
 
 router = APIRouter(prefix="/locations", tags=["locations"])
 
@@ -116,14 +115,17 @@ def seed_locations_if_empty() -> None:
 
 
 @router.get("/cities", response_model=CityListResponse)
-def list_cities() -> CityListResponse:
+def list_cities(_: AuthenticatedUser) -> CityListResponse:
     seed_locations_if_empty()
     names = [document["name"] for document in cities.find().sort("name", 1)]
     return CityListResponse(cities=names)
 
 
 @router.get("/localities", response_model=LocalityListResponse)
-def list_localities(city: str = Query(..., min_length=1, max_length=80)) -> LocalityListResponse:
+def list_localities(
+    _: AuthenticatedUser,
+    city: str = Query(..., min_length=1, max_length=80),
+) -> LocalityListResponse:
     seed_locations_if_empty()
     city_name = _normalize(city)
     if not city_name:
@@ -142,7 +144,7 @@ def list_localities(city: str = Query(..., min_length=1, max_length=80)) -> Loca
 @router.post("/add-junction", response_model=AddJunctionResponse, status_code=status.HTTP_201_CREATED)
 def add_junction(
     payload: AddJunctionRequest,
-    _: Annotated[dict, Depends(get_current_user)],
+    _: AuthenticatedUser,
 ) -> AddJunctionResponse:
     """Add a city and locality to the dropdown lists (same data as shop create/update)."""
     city, locality = ensure_city_and_locality(payload.city, payload.locality)

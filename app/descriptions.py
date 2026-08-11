@@ -1,7 +1,10 @@
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 from pydantic import BaseModel, Field, field_validator
 
+from .access_control import AuthenticatedUser
 from .gemini import generate_text
+from .plan_service import require_active_plan
+from .rate_limit import RATE_LIMIT_AI, limiter
 
 router = APIRouter(prefix="/descriptions", tags=["descriptions"])
 
@@ -36,5 +39,11 @@ def generate_description(text: str) -> str:
 
 
 @router.post("/generate", response_model=DescriptionResponse, status_code=status.HTTP_200_OK)
-def generate_product_description(payload: DescriptionRequest) -> DescriptionResponse:
+@limiter.limit(RATE_LIMIT_AI)
+def generate_product_description(
+    request: Request,
+    payload: DescriptionRequest,
+    current_user: AuthenticatedUser,
+) -> DescriptionResponse:
+    require_active_plan(current_user)
     return DescriptionResponse(description=generate_description(payload.text))

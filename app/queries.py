@@ -1,12 +1,15 @@
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
+from .access_control import AuthenticatedUser
 from .gemini_images import (
     MAX_GENERATED_IMAGES_PER_REQUEST,
     PRODUCT_IMAGE_STYLES,
     generate_product_images,
 )
 from .image_models import ImageResult
+from .plan_service import require_active_plan
+from .rate_limit import RATE_LIMIT_AI, limiter
 
 router = APIRouter(prefix="/queries", tags=["queries"])
 
@@ -99,12 +102,15 @@ def collect_suggested_images(
 
 
 @router.get("", response_model=QuerySearchResponse)
+@limiter.limit(RATE_LIMIT_AI)
 def search_images(
     request: Request,
+    current_user: AuthenticatedUser,
     query: str = Query(min_length=1, max_length=200),
     page: int = Query(default=1, ge=1, le=100),
     per_page: int = Query(default=10, ge=1, le=MAX_GENERATED_IMAGES_PER_REQUEST),
 ) -> QuerySearchResponse:
+    require_active_plan(current_user)
     cleaned_query = query.strip()
     if not cleaned_query:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="query must not be blank")
@@ -117,7 +123,13 @@ def search_images(
 
 
 @router.post("", response_model=QuerySearchResponse, status_code=status.HTTP_200_OK)
-def search_images_post(payload: QuerySearchRequest, request: Request) -> QuerySearchResponse:
+@limiter.limit(RATE_LIMIT_AI)
+def search_images_post(
+    request: Request,
+    payload: QuerySearchRequest,
+    current_user: AuthenticatedUser,
+) -> QuerySearchResponse:
+    require_active_plan(current_user)
     return build_query_search_response(
         query=payload.query,
         page=payload.page,
@@ -127,5 +139,11 @@ def search_images_post(payload: QuerySearchRequest, request: Request) -> QuerySe
 
 
 @router.post("/suggest-images", response_model=ProductImageSuggestResponse, status_code=status.HTTP_200_OK)
-def suggest_product_images(payload: ProductImageSuggestRequest, request: Request) -> ProductImageSuggestResponse:
+@limiter.limit(RATE_LIMIT_AI)
+def suggest_product_images(
+    request: Request,
+    payload: ProductImageSuggestRequest,
+    current_user: AuthenticatedUser,
+) -> ProductImageSuggestResponse:
+    require_active_plan(current_user)
     return collect_suggested_images(payload.product_name, base_url=request_base_url(request))

@@ -1,3 +1,4 @@
+import os
 from dotenv import load_dotenv
 from datetime import datetime, timezone
 
@@ -8,7 +9,12 @@ from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo import ReturnDocument
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
+from .access_control import AuthenticatedUser
+from .cors_config import load_cors_origins
 from .descriptions import router as descriptions_router
 from .database import items
 from .admin import router as admin_router
@@ -22,30 +28,32 @@ from .plan_applications import router as plan_applications_router
 from .products import router as products_router
 from .profile import notices_router, router as profile_router
 from .queries import router as queries_router
+from .rate_limit import limiter
 from .shops import router as shops_router
 from .terms import router as terms_router
 from .waitlist import router as waitlist_router
+
+_openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 app = FastAPI(
     title="Junction Backend",
     description="A small CRUD API backed by MongoDB.",
     version="1.0.0",
+    docs_url="/docs" if _openapi_enabled else None,
+    redoc_url="/redoc" if _openapi_enabled else None,
+    openapi_url="/openapi.json" if _openapi_enabled else None,
 )
 
-# Allow frontend domains (Netlify, Vercel, local dev)
-origins = [    # if you also use backoffice
-    
-    "http://localhost:4211",  # local dev testing
-    "https://junction-frontweb.vercel.app",
-    "http://localhost:4200",
-]
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,          # domains allowed to call your backend
+    allow_origins=load_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],            # GET, POST, PUT, DELETE, etc.
-    allow_headers=["*"],            # headers like Authorization, Content-Type
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 app.include_router(login_router)
 app.include_router(digilocker_router)
@@ -105,7 +113,7 @@ def object_id(item_id: str) -> ObjectId:
 
 
 @app.post("/items", response_model=Item, status_code=status.HTTP_201_CREATED)
-def create_item(payload: ItemCreate) -> Item:
+def create_item(payload: ItemCreate, _: AuthenticatedUser) -> Item:
     now = datetime.now(timezone.utc)
     document = {**payload.model_dump(), "created_at": now, "updated_at": now}
     result = items.insert_one(document)
@@ -114,7 +122,7 @@ def create_item(payload: ItemCreate) -> Item:
 
 
 @app.get("/items/{item_id}", response_model=Item)
-def read_item(item_id: str) -> Item:
+def read_item(item_id: str, _: AuthenticatedUser) -> Item:
     document = items.find_one({"_id": object_id(item_id)})
     if document is None:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -122,7 +130,7 @@ def read_item(item_id: str) -> Item:
 
 
 @app.put("/items/{item_id}", response_model=Item)
-def update_item(item_id: str, payload: ItemUpdate) -> Item:
+def update_item(item_id: str, payload: ItemUpdate, _: AuthenticatedUser) -> Item:
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail="Provide at least one field to update")
@@ -138,7 +146,7 @@ def update_item(item_id: str, payload: ItemUpdate) -> Item:
 
 
 @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_item(item_id: str) -> Response:
+def delete_item(item_id: str, _: AuthenticatedUser) -> Response:
     result = items.delete_one({"_id": object_id(item_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Item not found")

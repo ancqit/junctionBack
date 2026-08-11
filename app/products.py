@@ -3,15 +3,20 @@ from enum import Enum
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from .access_control import (
+    AuthenticatedUser,
+    apply_store_filter,
+    require_product_access,
+    require_store_access,
+)
 from .database import products
-from .login import get_current_user
-from .plan_service import ensure_can_add_product
+from .plan_service import ensure_can_add_product, require_active_plan
 from .product_images import (
     delete_product_image,
     fetch_image_from_cdn,
@@ -20,6 +25,7 @@ from .product_images import (
     validate_image_upload,
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
+from .rate_limit import RATE_LIMIT_AI, limiter
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -332,7 +338,13 @@ async def store_product_image_from_cdn(
 
 
 @router.post("/images/suggest", response_model=ProductImageSuggestResponse, status_code=status.HTTP_200_OK)
-def suggest_product_images(payload: ProductImagesSuggestRequest, request: Request) -> ProductImageSuggestResponse:
+@limiter.limit(RATE_LIMIT_AI)
+def suggest_product_images(
+    request: Request,
+    payload: ProductImagesSuggestRequest,
+    current_user: AuthenticatedUser,
+) -> ProductImageSuggestResponse:
+    require_active_plan(current_user)
     return collect_suggested_images(
         payload.product_name,
         count=10,
@@ -341,20 +353,25 @@ def suggest_product_images(payload: ProductImagesSuggestRequest, request: Reques
 
 
 @router.get("/images/{stored_image_id}")
-def get_stored_product_image(stored_image_id: str) -> StreamingResponse:
+def get_stored_product_image(stored_image_id: str, _: AuthenticatedUser) -> StreamingResponse:
     stream, content_type, filename = get_product_image(stored_image_id)
     return StreamingResponse(stream, media_type=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 
 @router.get("", response_model=list[Product])
-def list_products(store_id: str | None = Query(default=None, min_length=1, max_length=80)) -> list[Product]:
-    query = {"store_id": store_id} if store_id else {}
+def list_products(
+    current_user: AuthenticatedUser,
+    store_id: str | None = Query(default=None, min_length=1, max_length=80),
+) -> list[Product]:
+    query: dict = {}
+    apply_store_filter(query, current_user, store_id)
     documents = products.find(query).sort("created_at", -1)
     return [serialize_product(document) for document in documents]
 
 
 @router.post("", response_model=Product, status_code=status.HTTP_201_CREATED)
-def create_product(payload: ProductCreate, current_user: Annotated[dict, Depends(get_current_user)]) -> Product:
+def create_product(payload: ProductCreate, current_user: AuthenticatedUser) -> Product:
+    require_store_access(current_user, payload.store_id)
     ensure_can_add_product(current_user, payload.store_id)
     products.create_index([("store_id", 1), ("sku", 1)], unique=True)
     now = datetime.now(timezone.utc)
@@ -368,17 +385,23 @@ def create_product(payload: ProductCreate, current_user: Annotated[dict, Depends
 
 
 @router.post("/{product_id}/image/cdn", response_model=Product)
-def set_product_image_cdn(product_id: str, payload: ProductImageCdnRequest) -> Product:
+def set_product_image_cdn(
+    product_id: str,
+    payload: ProductImageCdnRequest,
+    current_user: AuthenticatedUser,
+) -> Product:
+    require_product_access(current_user, product_id)
     image = ProductImage(source=ProductImageSource.cdn, cdn=payload.cdn)
     return update_product_image(product_id, image, image_cdn=str(payload.cdn))
 
 
 @router.post("/{product_id}/image/use", response_model=Product)
-async def use_product_image_from_cdn(product_id: str, payload: ProductImageUseRequest) -> Product:
-    product = products.find_one({"_id": parse_object_id(product_id, "Product")})
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
+async def use_product_image_from_cdn(
+    product_id: str,
+    payload: ProductImageUseRequest,
+    current_user: AuthenticatedUser,
+) -> Product:
+    product = require_product_access(current_user, product_id)
     gallery = product_images_from_document(product)
     if len(gallery) >= MAX_PRODUCT_IMAGES:
         raise HTTPException(
@@ -397,17 +420,18 @@ async def use_product_image_from_cdn(product_id: str, payload: ProductImageUseRe
 
 
 @router.post("/{product_id}/images", response_model=Product)
-async def attach_product_images_from_cdns(product_id: str, payload: ProductImagesAttachRequest) -> Product:
+async def attach_product_images_from_cdns(
+    product_id: str,
+    payload: ProductImagesAttachRequest,
+    current_user: AuthenticatedUser,
+) -> Product:
     if len(payload.cdns) > MAX_PRODUCT_IMAGES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Select at most {MAX_PRODUCT_IMAGES} images per product",
         )
 
-    product = products.find_one({"_id": parse_object_id(product_id, "Product")})
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
+    product = require_product_access(current_user, product_id)
     stored_images: list[ProductImage] = []
     for cdn in payload.cdns:
         stored_images.append(
@@ -422,11 +446,12 @@ async def attach_product_images_from_cdns(product_id: str, payload: ProductImage
 
 
 @router.post("/{product_id}/image/upload", response_model=Product)
-async def upload_product_image(product_id: str, file: UploadFile = File(...)) -> Product:
-    product = products.find_one({"_id": parse_object_id(product_id, "Product")})
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-
+async def upload_product_image(
+    product_id: str,
+    current_user: AuthenticatedUser,
+    file: UploadFile = File(...),
+) -> Product:
+    product = require_product_access(current_user, product_id)
     gallery = product_images_from_document(product)
     if len(gallery) >= MAX_PRODUCT_IMAGES:
         raise HTTPException(
@@ -511,12 +536,10 @@ def update_product_image(product_id: str, image: ProductImage, image_cdn: str | 
 
 
 @router.put("/{product_id}", response_model=Product)
-def update_product(product_id: str, payload: ProductUpdate) -> Product:
+def update_product(product_id: str, payload: ProductUpdate, current_user: AuthenticatedUser) -> Product:
+    existing = require_product_access(current_user, product_id)
     changes = payload.model_dump(exclude_unset=True, mode="json", exclude={"image", "image_url", "images"})
     if payload.image is not None:
-        existing = products.find_one({"_id": parse_object_id(product_id, "Product")})
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Product not found")
         gallery = product_images_from_document(existing)
         if gallery:
             gallery[0] = payload.image
@@ -552,10 +575,8 @@ def update_product(product_id: str, payload: ProductUpdate) -> Product:
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_product(product_id: str) -> Response:
-    existing = products.find_one({"_id": parse_object_id(product_id, "Product")})
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+def delete_product(product_id: str, current_user: AuthenticatedUser) -> Response:
+    existing = require_product_access(current_user, product_id)
     delete_stored_images(product_images_from_document(existing))
     result = products.delete_one({"_id": existing["_id"]})
     if result.deleted_count == 0:
