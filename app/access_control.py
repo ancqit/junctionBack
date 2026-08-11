@@ -7,8 +7,15 @@ from fastapi import Depends, HTTPException, status
 from .database import employees, orders, products, shops
 from .login import get_current_user
 from .roles import UserRole, get_user_role
-from .shops import ensure_shop_access
 from .utils import parse_object_id
+
+
+def ensure_shop_access(user: dict, shop: dict) -> None:
+    """Admins may access any shop; owners only their own."""
+    if get_user_role(user) == UserRole.admin:
+        return
+    if str(shop.get("owner_user_id")) != str(user["_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this shop")
 
 
 def get_shop_by_store_id(store_id: str) -> dict:

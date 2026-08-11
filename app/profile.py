@@ -6,10 +6,9 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_vali
 from pymongo import ReturnDocument
 
 from .database import notices, shops, users
-from .access_control import AuthenticatedUser, require_store_access
+from .access_control import AuthenticatedUser, ensure_shop_access, require_store_access
 from .login import get_current_user
 from .roles import UserRole, get_user_role
-from .shops import ensure_shop_access
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/profile", tags=["profile"])
