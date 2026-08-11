@@ -16,9 +16,9 @@ Authorization: Bearer <access_token>
 ## Security
 
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
-- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`. No user login required.
+- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`, catalog **shop reads**, and **product reads**. No user login required.
 - **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — session/user JWT checks do.
-- **Shop-scoped writes/reads** require the user to own the shop (or be admin).
+- **Shop-scoped writes** (and owner-app reads) require the user to own the shop (or be admin). `junction.today` session tokens are **read-only** for shops/products.
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
@@ -56,12 +56,15 @@ Guest security when there is no user login. Intended for the **junction.today** 
 
 **Front-end flow (`junction.today`):**
 1. `POST /session` → store `access_token`
-2. Call location APIs with `Authorization: Bearer <access_token>`
+2. Call APIs with `Authorization: Bearer <access_token>`:
+   - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
+   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
+   - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
 3. When the token expires (~100s), call `POST /session` again for a new one
 
 Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
 
-Session JWTs are **not** user login tokens — they only unlock guest routes such as `/locations/*`.
+Session JWTs are **not** user login tokens — they unlock guest/catalog routes only. Creating or editing shops/products still requires a normal owner login JWT.
 
 ---
 
@@ -126,14 +129,16 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/shops` | Bearer | List shops. Owners see their own; admins see all. |
-| `GET` | `/shops/{shop_id}` | Bearer | Get one shop by ID. |
-| `GET` | `/shops/by-name/{shop_name}` | Bearer | Find shop(s) by name (case-insensitive). |
-| `POST` | `/shops` | Bearer | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |
-| `PUT` | `/shops/{shop_id}` | Bearer | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
-| `PUT` | `/shops/open-status` | Bearer | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
-| `DELETE` | `/shops/{shop_id}` | Bearer | Delete a shop. |
-| `GET` | `/shops/types` | Public | List all shop/business types as a JSON array. Each item has `value`, `label`, `category` (`retail`, `food`, `beverage`, `services`, etc.), optional `group` (e.g. `technician`, `home_maintenance` under services), and `description`. |
+| `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
+| `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
+| `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
+| `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
+| `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
+| `POST` | `/shops` | Bearer (user) | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |
+| `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
+| `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
+| `DELETE` | `/shops/{shop_id}` | Bearer (user) | Delete a shop. |
+| `GET` | `/shops/types` | Bearer (user **or** session) | List all shop/business types. |
 
 Shop responses include `open_time`, `closed_time`, and `is_open` so the front end can show hours and current open/closed state without recomputing.
 
@@ -143,16 +148,18 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/products` | Public | List products. Optional query: `store_id` (shop ID). |
-| `POST` | `/products` | Bearer | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
-| `PUT` | `/products/{product_id}` | Public | Update product fields (name, price, stock, status, image, etc.). |
-| `DELETE` | `/products/{product_id}` | Public | Delete a product. |
-| `POST` | `/products/images/suggest` | Bearer | Suggest up to **10** Pexels CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. Requires active plan. |
-| `GET` | `/products/images/{stored_image_id}` | Public | Serve a stored product image (from upload or query flow). |
-| `POST` | `/products/{product_id}/image/cdn` | Public | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
-| `POST` | `/products/{product_id}/image/use` | Public | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
-| `POST` | `/products/{product_id}/images` | Public | Attach up to **5** chosen CDN images to the product. Body: `{ "cdns": ["https://...", "..."] }`. Replaces the gallery. |
-| `POST` | `/products/{product_id}/image/upload` | Public | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and adds to gallery (max 5). |
+| `GET` | `/products` | Bearer (user **or** session) | List products. Optional `store_id`. Owner JWT is shop-scoped; `junction.today` session sees the public catalog. |
+| `GET` | `/products/by-location` | Bearer (user **or** session) | List products for shops in a location. Query: `city`, `locality` (both required). |
+| `GET` | `/products/{product_id}` | Bearer (user **or** session) | Get one product by ID. |
+| `POST` | `/products` | Bearer (user) | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
+| `PUT` | `/products/{product_id}` | Bearer (user) | Update product fields (name, price, stock, status, image, etc.). |
+| `DELETE` | `/products/{product_id}` | Bearer (user) | Delete a product. |
+| `POST` | `/products/images/suggest` | Bearer (user) | Suggest up to **10** Pexels CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. Requires active plan. |
+| `GET` | `/products/images/{stored_image_id}` | Bearer (user **or** session) | Serve a stored product image (from upload or query flow). |
+| `POST` | `/products/{product_id}/image/cdn` | Bearer (user) | Set hero image to an external CDN URL. Body: `{ "cdn": "https://..." }`. |
+| `POST` | `/products/{product_id}/image/use` | Bearer (user) | Download one CDN image and add it to the gallery (max 5). Body: `{ "cdn": "https://..." }`. |
+| `POST` | `/products/{product_id}/images` | Bearer (user) | Attach up to **5** chosen CDN images to the product. Body: `{ "cdns": ["https://...", "..."] }`. Replaces the gallery. |
+| `POST` | `/products/{product_id}/image/upload` | Bearer (user) | Upload image file (`multipart/form-data`, field: `file`). Stores in GridFS and adds to gallery (max 5). |
 
 **Product images:** Each product supports up to **5** images in `images[]`. The first image is also exposed as `image` / `image_cdn` (hero).
 

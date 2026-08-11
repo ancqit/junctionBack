@@ -12,10 +12,11 @@ from pymongo.errors import DuplicateKeyError
 from .access_control import (
     AuthenticatedUser,
     apply_store_filter,
+    get_product_or_404,
     require_product_access,
     require_store_access,
 )
-from .database import products
+from .database import products, shops
 from .plan_service import ensure_can_add_product, require_active_plan
 from .product_images import (
     delete_product_image,
@@ -26,6 +27,8 @@ from .product_images import (
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
 from .rate_limit import RATE_LIMIT_AI, limiter
+from .roles import UserRole, get_user_role
+from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -354,20 +357,75 @@ def suggest_product_images(
 
 
 @router.get("/images/{stored_image_id}")
-def get_stored_product_image(stored_image_id: str, _: AuthenticatedUser) -> StreamingResponse:
+def get_stored_product_image(stored_image_id: str, _: CatalogReader) -> StreamingResponse:
+    """Serve a stored product image (owner app or junction.today session)."""
     stream, content_type, filename = get_product_image(stored_image_id)
     return StreamingResponse(stream, media_type=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 
 @router.get("", response_model=list[Product])
 def list_products(
-    current_user: AuthenticatedUser,
+    auth: CatalogReader,
     store_id: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> list[Product]:
+    """
+    List products.
+    - User JWT: scoped to owned stores (optional store_id filter).
+    - junction.today session JWT: public catalog; optional store_id filter, no ownership check.
+    """
     query: dict = {}
-    apply_store_filter(query, current_user, store_id)
+    if is_junction_session(auth):
+        if store_id is not None:
+            query["store_id"] = store_id.strip()
+    else:
+        apply_store_filter(query, auth["user"], store_id)
     documents = products.find(query).sort("created_at", -1)
     return [serialize_product(document) for document in documents]
+
+
+@router.get("/by-location", response_model=list[Product])
+def list_products_by_location(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    locality: str = Query(..., min_length=1, max_length=120),
+) -> list[Product]:
+    """
+    List products for shops in a city + locality.
+    Intended for junction.today (session JWT); also works with owner/admin user JWT.
+    """
+    city_name = city.strip()
+    locality_name = locality.strip()
+    if not city_name or not locality_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="city and locality are required",
+        )
+
+    shop_query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+        "locality": {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"},
+    }
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            shop_query["owner_user_id"] = str(current_user["_id"])
+
+    store_ids = [str(shop["_id"]) for shop in shops.find(shop_query, {"_id": 1})]
+    if not store_ids:
+        return []
+
+    documents = products.find({"store_id": {"$in": store_ids}}).sort("created_at", -1)
+    return [serialize_product(document) for document in documents]
+
+
+@router.get("/{product_id}", response_model=Product)
+def get_product(product_id: str, auth: CatalogReader) -> Product:
+    """Get one product by id (owner-scoped for user JWT; public for junction.today session)."""
+    document = get_product_or_404(product_id)
+    if not is_junction_session(auth):
+        require_store_access(auth["user"], document["store_id"])
+    return serialize_product(document)
 
 
 @router.post("", response_model=Product, status_code=status.HTTP_201_CREATED)

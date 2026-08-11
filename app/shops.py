@@ -2,16 +2,18 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .access_control import AuthenticatedUser, ensure_shop_access
-from .database import shops
+from .access_control import ensure_shop_access
+from .database import products, shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
+from .products import Product, serialize_product
 from .roles import UserRole, get_user_role
+from .session import CatalogReader, is_junction_session
 from .shop_types import SHOP_TYPES, ShopTypeInfo
 from .utils import parse_object_id
 
@@ -170,12 +172,23 @@ def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
 
 
 @router.get("/types", response_model=list[ShopTypeInfo])
-def list_shop_types(_: AuthenticatedUser) -> list[ShopTypeInfo]:
+def list_shop_types(_: CatalogReader) -> list[ShopTypeInfo]:
+    """Shop types for owner app (user JWT) or junction.today (session JWT)."""
     return SHOP_TYPES
 
 
 @router.get("", response_model=list[Shop])
-def list_shops(current_user: Annotated[dict, Depends(get_current_user)]) -> list[Shop]:
+def list_shops(auth: CatalogReader) -> list[Shop]:
+    """
+    List shops.
+    - User JWT: owner sees own shops; admin sees all.
+    - junction.today session JWT: public catalog of all shops.
+    """
+    if is_junction_session(auth):
+        documents = shops.find({}).sort("created_at", -1)
+        return [serialize_shop(document) for document in documents]
+
+    current_user = auth["user"]
     role = get_user_role(current_user)
     query = {} if role == UserRole.admin else {"owner_user_id": str(current_user["_id"])}
     documents = shops.find(query).sort("created_at", -1)
@@ -183,20 +196,54 @@ def list_shops(current_user: Annotated[dict, Depends(get_current_user)]) -> list
 
 
 @router.get("/by-name/{shop_name}", response_model=list[Shop])
-def get_shops_by_name(shop_name: str, current_user: Annotated[dict, Depends(get_current_user)]) -> list[Shop]:
+def get_shops_by_name(shop_name: str, auth: CatalogReader) -> list[Shop]:
     name = shop_name.strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="shop_name must not be blank")
 
     escaped = re.escape(name)
     query: dict = {"name": {"$regex": f"^{escaped}$", "$options": "i"}}
-    role = get_user_role(current_user)
-    if role != UserRole.admin:
-        query["owner_user_id"] = str(current_user["_id"])
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            query["owner_user_id"] = str(current_user["_id"])
 
     documents = list(shops.find(query).sort("created_at", -1))
     if not documents:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No shops found with this name")
+    return [serialize_shop(document) for document in documents]
+
+
+@router.get("/by-location", response_model=list[Shop])
+def list_shops_by_location(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    locality: str = Query(..., min_length=1, max_length=120),
+) -> list[Shop]:
+    """
+    List shops in a city + locality.
+    Intended for junction.today (session JWT); also works with owner/admin user JWT.
+    """
+    city_name = city.strip()
+    locality_name = locality.strip()
+    if not city_name or not locality_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="city and locality are required",
+        )
+
+    query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+        "locality": {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"},
+    }
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            query["owner_user_id"] = str(current_user["_id"])
+
+    documents = shops.find(query).sort("created_at", -1)
     return [serialize_shop(document) for document in documents]
 
 
@@ -217,12 +264,30 @@ def update_shop_open_status(
 
 
 @router.get("/{shop_id}", response_model=Shop)
-def get_shop(shop_id: str, current_user: Annotated[dict, Depends(get_current_user)]) -> Shop:
+def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
-    ensure_shop_access(current_user, document)
+    if not is_junction_session(auth):
+        ensure_shop_access(auth["user"], document)
     return serialize_shop(document)
+
+
+@router.get("/{shop_id}/products", response_model=list[Product])
+def list_products_for_shop(shop_id: str, auth: CatalogReader) -> list[Product]:
+    """
+    List products for one shop.
+    Flow for junction.today: /shops/by-location → select shop → /shops/{shop_id}/products.
+    """
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    if not is_junction_session(auth):
+        ensure_shop_access(auth["user"], document)
+
+    store_id = str(document["_id"])
+    documents = products.find({"store_id": store_id}).sort("created_at", -1)
+    return [serialize_product(item) for item in documents]
 
 
 @router.post("", response_model=Shop, status_code=status.HTTP_201_CREATED)

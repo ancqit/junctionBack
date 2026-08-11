@@ -124,6 +124,48 @@ def require_junction_session(token: Annotated[str, Depends(oauth2_scheme)]) -> d
 JunctionSession = Annotated[dict, Depends(require_junction_session)]
 
 
+def require_catalog_reader(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
+    """
+    Accept either a junction.today session JWT or a normal user JWT.
+    Used for catalog reads (shops/products) shared by the owner app and junction.today.
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            _secret(),
+            algorithms=["HS256"],
+            options={"verify_aud": False},
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    if payload.get("typ") == SESSION_TOKEN_TYPE:
+        session = require_junction_session(token)
+        return {"kind": "session", "session": session, "user": None}
+
+    from .login import get_current_user
+
+    user = get_current_user(token)
+    return {"kind": "user", "session": None, "user": user}
+
+
+CatalogReader = Annotated[dict, Depends(require_catalog_reader)]
+
+
+def is_junction_session(auth: dict) -> bool:
+    return auth.get("kind") == "session"
+
+
 @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(RATE_LIMIT_AUTH)
 def create_session(request: Request) -> SessionResponse:
