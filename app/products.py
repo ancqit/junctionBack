@@ -12,6 +12,7 @@ from pymongo.errors import DuplicateKeyError
 from .access_control import (
     AuthenticatedUser,
     apply_store_filter,
+    get_product_or_404,
     require_product_access,
     require_store_access,
 )
@@ -26,6 +27,7 @@ from .product_images import (
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
 from .rate_limit import RATE_LIMIT_AI, limiter
+from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -354,20 +356,39 @@ def suggest_product_images(
 
 
 @router.get("/images/{stored_image_id}")
-def get_stored_product_image(stored_image_id: str, _: AuthenticatedUser) -> StreamingResponse:
+def get_stored_product_image(stored_image_id: str, _: CatalogReader) -> StreamingResponse:
+    """Serve a stored product image (owner app or junction.today session)."""
     stream, content_type, filename = get_product_image(stored_image_id)
     return StreamingResponse(stream, media_type=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 
 @router.get("", response_model=list[Product])
 def list_products(
-    current_user: AuthenticatedUser,
+    auth: CatalogReader,
     store_id: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> list[Product]:
+    """
+    List products.
+    - User JWT: scoped to owned stores (optional store_id filter).
+    - junction.today session JWT: public catalog; optional store_id filter, no ownership check.
+    """
     query: dict = {}
-    apply_store_filter(query, current_user, store_id)
+    if is_junction_session(auth):
+        if store_id is not None:
+            query["store_id"] = store_id.strip()
+    else:
+        apply_store_filter(query, auth["user"], store_id)
     documents = products.find(query).sort("created_at", -1)
     return [serialize_product(document) for document in documents]
+
+
+@router.get("/{product_id}", response_model=Product)
+def get_product(product_id: str, auth: CatalogReader) -> Product:
+    """Get one product by id (owner-scoped for user JWT; public for junction.today session)."""
+    document = get_product_or_404(product_id)
+    if not is_junction_session(auth):
+        require_store_access(auth["user"], document["store_id"])
+    return serialize_product(document)
 
 
 @router.post("", response_model=Product, status_code=status.HTTP_201_CREATED)
