@@ -9,10 +9,12 @@ from .rate_limit import RATE_LIMIT_AI, limiter
 router = APIRouter(prefix="/descriptions", tags=["descriptions"])
 
 DESCRIPTION_PROMPT = (
-    "You are writing product copy for an online shop catalog. "
-    "Turn the following short product summary into a clear, detailed product description. "
-    "Use complete sentences, highlight key features and benefits, and keep a professional tone. "
-    "Do not invent specifications that are not implied by the summary. "
+    "You are an expert ecommerce copywriter for an Indian online shop catalog. "
+    "Turn the following short product summary into a rich, detailed product description. "
+    "Write 3 to 5 paragraphs covering: what the product is, key features, who it is for, "
+    "typical use cases, and why a customer should buy it. "
+    "Use complete sentences, professional but friendly tone, and bullet-friendly phrasing where helpful. "
+    "Do not invent exact specifications, certifications, or warranty terms not implied by the summary. "
     "Return only the description text with no title, labels, or markdown.\n\n"
     "Summary:\n{text}"
 )
