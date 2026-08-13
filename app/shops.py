@@ -23,7 +23,7 @@ from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .shop_payments import PlanPurchaseRequest, ShopPayment, create_plan_purchase
 from .shop_types import SHOP_TYPES, ShopTypeInfo
-from .utils import parse_object_id
+from .utils import parse_object_id, ShowPhone
 
 router = APIRouter(prefix="/shops", tags=["shops"])
 
@@ -245,18 +245,32 @@ def list_shop_types(_: CatalogReader) -> list[ShopTypeInfo]:
 @router.get("", response_model=list[Shop])
 def list_shops(
     auth: CatalogReader,
-    show_phone: bool = Query(
-        False,
-        description="For junction.today session: reveal shop mobile numbers when true",
-    ),
+    show_phone: ShowPhone,
+    shop_id: str | None = Query(default=None, max_length=80, description="Return this shop only"),
+    store_id: str | None = Query(default=None, max_length=80, description="Alias of shop_id"),
 ) -> list[Shop]:
     """
     List shops.
     - User JWT: owner sees own shops; admin sees all.
     - junction.today session JWT: public catalog of all shops.
       Mobile numbers are hidden unless show_phone=true.
+    - Optional shop_id/store_id query returns that one shop.
     """
     with_phone = include_phone_number(auth, show_phone)
+    requested = (shop_id or store_id or "").strip()
+    if shop_id and store_id and shop_id.strip() != store_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="shop_id and store_id must match when both are provided",
+        )
+    if requested:
+        document = shops.find_one({"_id": parse_object_id(requested, "Shop")})
+        if document is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+        if not is_junction_session(auth):
+            ensure_shop_access(auth["user"], document)
+        return [serialize_shop(document, include_phone=with_phone)]
+
     if is_junction_session(auth):
         documents = shops.find({}).sort("created_at", -1)
         return [serialize_shop(document, include_phone=with_phone) for document in documents]
@@ -272,10 +286,7 @@ def list_shops(
 def get_shops_by_name(
     shop_name: str,
     auth: CatalogReader,
-    show_phone: bool = Query(
-        False,
-        description="For junction.today session: reveal shop mobile numbers when true",
-    ),
+    show_phone: ShowPhone,
 ) -> list[Shop]:
     name = shop_name.strip()
     if not name:
@@ -299,12 +310,9 @@ def get_shops_by_name(
 @router.get("/by-location", response_model=list[Shop])
 def list_shops_by_location(
     auth: CatalogReader,
+    show_phone: ShowPhone,
     city: str = Query(..., min_length=1, max_length=80),
     locality: str = Query(..., min_length=1, max_length=120),
-    show_phone: bool = Query(
-        False,
-        description="For junction.today session: reveal shop mobile numbers when true",
-    ),
 ) -> list[Shop]:
     """
     List shops in a city + locality.
@@ -353,10 +361,7 @@ def update_shop_open_status(
 def get_shop(
     shop_id: str,
     auth: CatalogReader,
-    show_phone: bool = Query(
-        False,
-        description="For junction.today session: reveal this shop's mobile number when true",
-    ),
+    show_phone: ShowPhone,
 ) -> Shop:
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:

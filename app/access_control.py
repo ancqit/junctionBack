@@ -65,6 +65,27 @@ def require_product_access(user: dict, product_id: str) -> dict:
     return document
 
 
+def resolve_store_id(*, store_id: str | None = None, shop_id: str | None = None, product_id: str | None = None) -> str:
+    """Resolve a shop id from store_id/shop_id and/or product_id query params."""
+    store = (store_id or shop_id or "").strip()
+    product = (product_id or "").strip()
+    if product:
+        document = get_product_or_404(product)
+        product_store = str(document["store_id"]).strip()
+        if store and store != product_store:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="product_id does not belong to this shop",
+            )
+        return product_store
+    if store:
+        return store
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="store_id, shop_id, or product_id is required",
+    )
+
+
 def get_employee_or_404(employee_id: str) -> dict:
     document = employees.find_one({"_id": parse_object_id(employee_id, "Employee")})
     if document is None:
