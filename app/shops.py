@@ -21,6 +21,7 @@ from .plan_service import (
 from .products import Product, serialize_product
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
+from .shop_payments import PlanPurchaseRequest, ShopPayment, create_plan_purchase
 from .shop_types import SHOP_TYPES, ShopTypeInfo
 from .utils import parse_object_id
 
@@ -367,18 +368,73 @@ def get_shop_plan(shop_id: str, current_user: Annotated[dict, Depends(get_curren
     return build_shop_plan_summary(document)
 
 
-@router.post("/{shop_id}/plan/select", response_model=PlanSummary)
-def select_shop_plan(
+@router.post("/{shop_id}/plan/purchase", response_model=ShopPayment, status_code=status.HTTP_201_CREATED)
+def purchase_shop_plan(
     shop_id: str,
-    payload: ShopPlanSelectRequest,
+    payload: PlanPurchaseRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
-) -> PlanSummary:
-    """Select/upgrade the plan for a shop (e.g. starter)."""
+) -> ShopPayment:
+    """
+    Start a paid plan purchase for this shop (pending payment).
+    The plan is activated only after POST /payments/{payment_id}/complete.
+    Then the shop can add products up to the plan limit.
+    """
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     ensure_shop_access(current_user, document)
-    return select_plan_for_shop(str(document["_id"]), payload.plan_type)
+    return create_plan_purchase(current_user, str(document["_id"]), payload.plan_type)
+
+
+@router.post("/{shop_id}/plan/select", response_model=ShopPayment, status_code=status.HTTP_201_CREATED)
+def select_shop_plan(
+    shop_id: str,
+    payload: ShopPlanSelectRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> ShopPayment:
+    """
+    Alias of POST /shops/{shop_id}/plan/purchase for paid plans.
+    Creates a pending payment; call POST /payments/{id}/complete to activate the plan,
+    then add products under that shop's allowance.
+    Admins activate immediately (payment recorded as paid).
+    """
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    ensure_shop_access(current_user, document)
+    store_id = str(document["_id"])
+
+    if get_user_role(current_user) == UserRole.admin:
+        select_plan_for_shop(store_id, payload.plan_type)
+        from .database import shop_payments as payments_col
+        from .plan_service import PLAN_CATALOG, utc_now
+        from .shop_payments import PaymentKind, ShopPaymentStatus, serialize_payment
+
+        details = PLAN_CATALOG[payload.plan_type.value]
+        now = utc_now()
+        payment_doc = {
+            "store_id": store_id,
+            "owner_user_id": document["owner_user_id"],
+            "kind": PaymentKind.plan.value,
+            "status": ShopPaymentStatus.paid.value,
+            "amount_inr": int(details["price_inr"]),
+            "currency": "INR",
+            "plan_type": payload.plan_type.value,
+            "packs": None,
+            "slots": None,
+            "description": f"{details['name']} plan (admin activation)",
+            "payment_method": None,
+            "payment_reference": "admin_bypass",
+            "created_at": now,
+            "updated_at": now,
+            "paid_at": now,
+            "fulfilled_at": now,
+        }
+        result = payments_col.insert_one(payment_doc)
+        payment_doc["_id"] = result.inserted_id
+        return serialize_payment(payment_doc)
+
+    return create_plan_purchase(current_user, store_id, payload.plan_type)
 
 
 @router.put("/{shop_id}", response_model=Shop)

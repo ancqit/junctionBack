@@ -774,7 +774,7 @@ def require_active_shop_plan(store_id: str) -> tuple[dict, PlanSummary]:
             )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This shop's plan has expired. Choose a plan for the shop to continue.",
+            detail="This shop's plan has expired. Purchase a plan and complete payment to continue.",
         )
     return shop, summary
 

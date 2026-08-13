@@ -9,7 +9,7 @@ Authorization: Bearer <access_token>
 ```
 
 **Roles:** `admin`, `owner`, `viewer`  
-**Plans:** Free Trial (40/15d), Starter (10/₹999/yr), Growth (80/₹2999/yr), Premium (150/₹599/yr) — attached to each **shop**. Extra packs: 40 products / ₹999. Admins are exempt from plan limits.
+**Plans:** Free Trial (40/15d), Starter (10/₹999/yr), Growth (80/₹2999/yr), Premium (150/₹599/yr) — attached to each **shop**. Paid plans/packs activate **after payment completes**, then products can be added. Extra packs: 40 products / ₹999. Admins are exempt from plan limits.
 
 **`store_id`** on products, employees, and orders = the **shop ID** from `/shops`.
 
@@ -141,9 +141,16 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | Growth | 80 | INR 2999 | 1 year |
 | Premium | 150 | INR 599 | 1 year |
 
-**Extra product packs:** after a shop’s plan allowance is used, buy packs of **40 products for INR 999** via `POST /product-bucket/slots`.
+**Extra product packs:** after a shop’s plan allowance is used, buy packs of **40 products for INR 999** via `POST /product-bucket/purchase` (then complete payment).
 
-New shops start on **Free Trial**. Upgrade with `POST /shops/{shop_id}/plan/select`.
+**Paid plan / pack flow (payment required before products unlock under that purchase):**
+1. `POST /shops/{shop_id}/plan/purchase` with `{ "plan_type": "starter" }` → pending payment (`amount_inr`, `id`)
+2. Collect payment in the app (UPI/card/etc.)
+3. `POST /payments/{payment_id}/complete` → plan becomes **active**
+4. `POST /products` with that shop’s `store_id` (up to plan limit)
+5. When plan products are full: `POST /product-bucket/purchase` → `POST /payments/{id}/complete` → then add more products
+
+New shops start on **Free Trial** (no payment). Paid plans activate only after payment completion.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
@@ -151,7 +158,8 @@ New shops start on **Free Trial**. Upgrade with `POST /shops/{shop_id}/plan/sele
 | `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
 | `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
 | `GET` | `/shops/{shop_id}/plan` | Bearer (user) | Get this shop's plan (limits/billing are per shop). |
-| `POST` | `/shops/{shop_id}/plan/select` | Bearer (user) | Select/upgrade shop plan. Body: `{ "plan_type": "starter" }`. |
+| `POST` | `/shops/{shop_id}/plan/purchase` | Bearer (user) | Start a paid plan purchase. Body: `{ "plan_type": "starter" }`. Returns **pending** payment; plan activates only after `POST /payments/{id}/complete`. |
+| `POST` | `/shops/{shop_id}/plan/select` | Bearer (user) | Alias of `plan/purchase` (pending payment). Admins activate immediately. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
 | `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Starts on Free Trial (40 products / 15 days). Name must be unique **per mobile number**. Phone is taken from the logged-in user. |
@@ -194,14 +202,30 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 
 ## Product bucket (`/product-bucket`)
 
-Extra product capacity for a shop after its plan allowance is used. Sold in packs of **40 products for INR 999**.
+Extra product capacity for a shop after its plan allowance is used. Sold in packs of **40 products for INR 999**. Capacity is added **only after payment completes**.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/product-bucket?store_id=` | Bearer (user) | Capacity for a shop: plan limit, products count, purchased extra slots, remaining. |
-| `POST` | `/product-bucket/slots` | Bearer (user) | Buy packs. Body: `{ "store_id": "<shop_id>", "packs": 1 }`. Each pack adds 40 slots (INR 999). Only after plan products are fully used. |
+| `POST` | `/product-bucket/purchase` | Bearer (user) | Start pack purchase. Body: `{ "store_id": "<shop_id>", "packs": 1 }`. Returns pending payment. |
+| `POST` | `/product-bucket/slots` | Bearer (user) | Alias of `/purchase` (pending payment). Admins apply packs immediately. |
 
-Total capacity = shop plan `max_products` + `extra_slots`. Creating products (`POST /products`) enforces this total.
+Then call `POST /payments/{payment_id}/complete` to add the slots. Total capacity = shop plan `max_products` + `extra_slots`.
+
+---
+
+## Shop payments (`/payments`)
+
+Plan and product-pack purchases for a shop. Paid plans/packs unlock product capacity only when status becomes `paid` and fulfillment runs.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/payments?store_id=` | Bearer (user) | List payment attempts for a shop. |
+| `GET` | `/payments/{payment_id}` | Bearer (user) | Get one payment. |
+| `POST` | `/payments/{payment_id}/complete` | Bearer (user) | Mark paid and activate plan or add packs. Optional body: `{ "payment_method": "upi", "payment_reference": "..." }`. |
+| `POST` | `/payments/{payment_id}/fail` | Bearer (user) | Mark a pending payment as failed. |
+
+**Complete response** includes `payment`, active `plan`, optional `product_bucket`, and a `message`. After a successful plan payment you can `POST /products` for that shop.
 
 ---
 
@@ -390,9 +414,9 @@ Early demo CRUD — not tied to shops.
 ### New shop owner (OTP login)
 1. `POST /auth/otp/request` → `POST /auth/otp/verify` (get token + plan + role) — phone is the account
 2. `POST /shops` as many times as needed (multiple shops per phone; unique name per phone)
-3. Optional: `POST /shops/{shop_id}/plan/select` with `{ "plan_type": "starter" }` (or growth/premium)
-4. `POST /products` with `store_id` = chosen shop ID (limits from that shop’s plan + packs)
-5. When plan products are full: `POST /product-bucket/slots` with `{ "store_id": "...", "packs": 1 }`
+3. Paid upgrade: `POST /shops/{shop_id}/plan/purchase` → pay → `POST /payments/{payment_id}/complete`
+4. `POST /products` with `store_id` = chosen shop ID (limits from that shop’s active plan + paid packs)
+5. When plan products are full: `POST /product-bucket/purchase` → `POST /payments/{id}/complete`
 6. `POST /employees` with same `store_id`
 7. `POST /orders` when a sale is made
 

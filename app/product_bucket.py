@@ -12,7 +12,7 @@ Extra capacity is sold in packs of 40 products for INR 999 each.
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
 
 from .access_control import AuthenticatedUser, require_store_access
@@ -76,6 +76,28 @@ def get_extra_slots(store_id: str) -> int:
         return 0
 
 
+def apply_bucket_packs(store_id: str, packs: int) -> int:
+    """Add pack capacity after payment succeeds. Returns slots added."""
+    store_id = store_id.strip()
+    slots_to_add = packs * BUCKET_PACK_SIZE
+    _ensure_bucket_indexes()
+    now = utc_now()
+    product_buckets.update_one(
+        {"store_id": store_id},
+        {
+            "$inc": {"extra_slots": slots_to_add, "packs_purchased": packs},
+            "$set": {
+                "updated_at": now,
+                "last_pack_price_inr": BUCKET_PACK_PRICE_INR,
+                "pack_size": BUCKET_PACK_SIZE,
+            },
+            "$setOnInsert": {"created_at": now, "store_id": store_id},
+        },
+        upsert=True,
+    )
+    return slots_to_add
+
+
 def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
     store_id = store_id.strip()
     require_store_access(user, store_id)
@@ -126,56 +148,37 @@ def get_product_bucket(
     return build_product_bucket(current_user, store_id)
 
 
-@router.post("/slots", response_model=ProductBucketResponse, status_code=status.HTTP_200_OK)
+@router.post("/purchase", status_code=status.HTTP_201_CREATED)
+def purchase_product_bucket_packs(
+    payload: AddBucketPacksRequest,
+    current_user: AuthenticatedUser,
+):
+    """
+    Start a product-pack purchase for a shop (pending payment).
+    Capacity is added only after POST /payments/{payment_id}/complete.
+    """
+    from .shop_payments import create_pack_purchase
+
+    return create_pack_purchase(current_user, payload.store_id, payload.packs)
+
+
+@router.post("/slots", status_code=status.HTTP_201_CREATED)
 def add_product_bucket_packs(
     payload: AddBucketPacksRequest,
     current_user: AuthenticatedUser,
-) -> ProductBucketResponse:
+):
     """
-    JWT-only. Buy extra product packs for a shop after plan allowance is used.
-    Each pack = 40 products for INR 999.
+    Alias of POST /product-bucket/purchase.
+    Creates a pending payment; packs apply after payment completion.
+    Admins may pass ?fulfill=true to apply immediately without payment.
     """
-    store_id = payload.store_id.strip()
-    require_store_access(current_user, store_id)
-    _, summary = require_active_shop_plan(store_id)
+    from .shop_payments import create_pack_purchase
 
-    if summary.profile_only:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This shop plan does not include products. Upgrade the shop plan first.",
-        )
+    if get_user_role(current_user) == UserRole.admin:
+        # Admin bypass: apply packs immediately.
+        store_id = payload.store_id.strip()
+        require_store_access(current_user, store_id)
+        apply_bucket_packs(store_id, payload.packs)
+        return build_product_bucket(current_user, store_id)
 
-    if summary.max_products is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This shop plan already allows unlimited products; packs are not needed.",
-        )
-
-    products_count = products.count_documents({"store_id": store_id})
-    if products_count < summary.max_products:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"This shop still has plan allowance remaining "
-                f"({products_count}/{summary.max_products}). "
-                "Buy packs after the plan products are used."
-            ),
-        )
-
-    slots_to_add = payload.packs * BUCKET_PACK_SIZE
-    _ensure_bucket_indexes()
-    now = utc_now()
-    product_buckets.update_one(
-        {"store_id": store_id},
-        {
-            "$inc": {"extra_slots": slots_to_add, "packs_purchased": payload.packs},
-            "$set": {
-                "updated_at": now,
-                "last_pack_price_inr": BUCKET_PACK_PRICE_INR,
-                "pack_size": BUCKET_PACK_SIZE,
-            },
-            "$setOnInsert": {"created_at": now, "store_id": store_id},
-        },
-        upsert=True,
-    )
-    return build_product_bucket(current_user, store_id)
+    return create_pack_purchase(current_user, payload.store_id, payload.packs)
