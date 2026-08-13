@@ -138,8 +138,8 @@ Daily notice board for shop offers and announcements. One notice per shop per UT
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `POST` | `/notices` | Bearer | Post or update today's notice. Body: `{ "store_id": "<shop_id>", "message": "20% off today!" }` (`shop_id` alias works). |
-| `GET` | `/notices/today?store_id=<shop_id>` | Public | Get today's notice for a shop. `shop_id` query alias works. No JWT required (session token is also fine). |
-| `GET` | `/notices` | Bearer (user **or** session) | List today's notices. Owner JWT: own shops (admin: all). Session: all today's notices, or filter with `store_id` / `shop_id`. |
+| `GET` | `/notices/today?store_id=<shop_id>` | Public | Get today's notice for a shop. Also at `/api/notices/today`. `shop_id` query alias works. **No JWT.** Empty `store_id` returns 400. |
+| `GET` | `/notices` | Public | List today's notices. Optional `store_id` / `shop_id`. Also at `/api/notices`. |
 
 ---
 
