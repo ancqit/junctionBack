@@ -58,6 +58,7 @@ Guest security when there is no user login. Intended for the **junction.today** 
 1. `POST /session` → store `access_token`
 2. Call APIs with `Authorization: Bearer <access_token>`:
    - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
+   - Shop names + phone toggle: `/session/shops`, `/session/shops/{id}` (see below)
    - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
 3. When the token expires (~100s), call `POST /session` again for a new one
@@ -65,6 +66,27 @@ Guest security when there is no user login. Intended for the **junction.today** 
 Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
 
 Session JWTs are **not** user login tokens — they unlock guest/catalog routes only. Creating or editing shops/products still requires a normal owner login JWT.
+
+### Shop name + phone toggle (`GET /session/shops`)
+
+Requires a **session JWT** (not an owner login token). Each item is a shop **name** with a view/hide toggle for that shop’s mobile number.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/session/shops` | Session | List shops as `{ id, name, phone_number, show_phone }`. Default hides numbers (`phone_number` is `null`, `show_phone` is `false`). Pass `show_phone=true` to reveal every number. Optional `city` + `locality` (both together) to filter. |
+| `GET` | `/session/shops/{shop_id}` | Session | One shop. Default hides the number; `show_phone=true` reveals that shop’s mobile. |
+
+**Hidden (toggle off):**
+```json
+{ "id": "...", "name": "Ram Kirana", "phone_number": null, "show_phone": false }
+```
+
+**Visible (toggle on, `?show_phone=true`):**
+```json
+{ "id": "...", "name": "Ram Kirana", "phone_number": "+919876543210", "show_phone": true }
+```
+
+Front-end: bind a switch per shop. Off → `GET /session/shops/{id}`. On → `GET /session/shops/{id}?show_phone=true`. Catalog `GET /shops*` with a session token also hides `phone_number` unless `show_phone=true`. Owner JWTs still always receive the number.
 
 ---
 
@@ -154,8 +176,8 @@ New shops start on **Free Trial** (no payment). Paid plans activate only after p
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
-| `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
+| `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog; `phone_number` is hidden unless `show_phone=true`. |
+| `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop; `phone_number` is hidden unless `show_phone=true`. |
 | `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
 | `GET` | `/shops/{shop_id}/plan` | Bearer (user) | Get this shop's plan (limits/billing are per shop). |
 | `POST` | `/shops/{shop_id}/plan/purchase` | Bearer (user) | Start a paid plan purchase. Body: `{ "plan_type": "starter" }`. Returns **pending** payment; plan activates only after `POST /payments/{id}/complete`. |
