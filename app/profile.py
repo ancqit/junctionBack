@@ -9,11 +9,9 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_vali
 from pymongo import ReturnDocument
 
 from .database import database, notices, shops, users
-from .access_control import ensure_shop_access, require_store_access, resolve_store_id
-from .session import CatalogReader, is_junction_session
+from .access_control import ensure_shop_access, resolve_store_id
 from .login import get_current_user
 from .product_images import validate_image_upload
-from .roles import UserRole, get_user_role
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/profile", tags=["profile"])
@@ -226,45 +224,37 @@ def post_today_notice(
     return serialize_notice(document)
 
 
-@notices_router.get("/today", response_model=Notice)
+@notices_router.get("/today", response_model=Notice, openapi_extra={"security": []})
 def get_today_notice(
-    store_id: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
-    shop_id: Annotated[str | None, Query(min_length=1, max_length=80, description="Alias of store_id")] = None,
+    store_id: Annotated[str | None, Query(max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
 ) -> Notice:
-    """Today's notice for a shop. Public (also works with a session or user JWT)."""
-    resolved = resolve_store_id(store_id=store_id, shop_id=shop_id)
+    """Today's notice for a shop. Public — no JWT required."""
+    resolved = (store_id or shop_id or "").strip()
+    if not resolved:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="store_id or shop_id is required",
+        )
+    resolved = resolve_store_id(store_id=resolved, shop_id=None)
     document = _find_today_notice(resolved)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No notice posted for today")
     return serialize_notice(document)
 
 
-@notices_router.get("", response_model=list[Notice])
+@notices_router.get("", response_model=list[Notice], openapi_extra={"security": []})
 def list_today_notices(
-    auth: CatalogReader,
-    store_id: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
-    shop_id: Annotated[str | None, Query(min_length=1, max_length=80, description="Alias of store_id")] = None,
+    store_id: Annotated[str | None, Query(max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
 ) -> list[Notice]:
+    """Today's notices. Public. Optional store_id/shop_id filters to one shop."""
     notice_date = today_utc().isoformat()
     requested = (store_id or shop_id or "").strip()
     if requested:
         resolved = resolve_store_id(store_id=store_id, shop_id=shop_id)
-        if not is_junction_session(auth):
-            require_store_access(auth["user"], resolved)
         document = _find_today_notice(resolved)
         return [serialize_notice(document)] if document else []
 
-    if is_junction_session(auth):
-        documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
-        return [serialize_notice(document) for document in documents]
-
-    current_user = auth["user"]
-    role = get_user_role(current_user)
-    if role == UserRole.admin:
-        documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
-    else:
-        shop_ids = [str(shop["_id"]) for shop in shops.find({"owner_user_id": str(current_user["_id"])})]
-        if not shop_ids:
-            return []
-        documents = notices.find({"store_id": {"$in": shop_ids}, "notice_date": notice_date}).sort("updated_at", -1)
+    documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
     return [serialize_notice(document) for document in documents]
