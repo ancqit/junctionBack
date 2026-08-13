@@ -611,9 +611,16 @@ def ensure_can_add_product(user: dict, store_id: str) -> None:
     if max_products is None:
         return
 
+    from .product_bucket import get_extra_slots
+
     current_count = products.count_documents({"store_id": store_id})
-    if current_count >= max_products:
+    capacity = max_products + get_extra_slots(store_id)
+    if current_count >= capacity:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Your {summary.name} plan allows up to {max_products} products.",
+            detail=(
+                f"Your {summary.name} plan allows up to {max_products} products"
+                f" ({capacity} with bucket slots). "
+                "Add more capacity via POST /product-bucket/slots or upgrade your plan."
+            ),
         )
