@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .database import sessions, shops
 from .login import JWT_SECRET, oauth2_scheme
 from .rate_limit import RATE_LIMIT_AUTH, limiter
-from .utils import parse_object_id
+from .utils import parse_object_id, ShowPhone
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -246,17 +246,29 @@ def _session_shop_location_query(
 @router.get("/shops", response_model=list[SessionShopContact])
 def list_session_shop_contacts(
     _: JunctionSession,
-    show_phone: bool = Query(
-        False,
-        description="Toggle: true reveals each shop's mobile number; false hides it",
-    ),
+    show_phone: ShowPhone,
+    shop_id: str | None = Query(default=None, max_length=80, description="Return this shop only"),
+    store_id: str | None = Query(default=None, max_length=80, description="Alias of shop_id"),
     city: str | None = Query(default=None, max_length=80),
     locality: str | None = Query(default=None, max_length=120),
 ) -> list[SessionShopContact]:
     """
     List shop names for junction.today. Mobile numbers stay hidden until
     show_phone=true (the view/hide toggle).
+    Pass shop_id (or store_id) to toggle one shop: /session/shops?shop_id=...&show_phone=true
     """
+    requested = (shop_id or store_id or "").strip()
+    if shop_id and store_id and shop_id.strip() != store_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="shop_id and store_id must match when both are provided",
+        )
+    if requested:
+        document = shops.find_one({"_id": parse_object_id(requested, "Shop")})
+        if document is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+        return [_serialize_session_shop_contact(document, show_phone=show_phone)]
+
     query = _session_shop_location_query(city, locality)
     documents = shops.find(query).sort("name", 1)
     return [_serialize_session_shop_contact(document, show_phone=show_phone) for document in documents]
@@ -266,10 +278,7 @@ def list_session_shop_contacts(
 def get_session_shop_contact(
     shop_id: str,
     _: JunctionSession,
-    show_phone: bool = Query(
-        False,
-        description="Toggle: true reveals this shop's mobile number; false hides it",
-    ),
+    show_phone: ShowPhone,
 ) -> SessionShopContact:
     """One shop name with a per-shop toggle to view or hide its mobile number."""
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})

@@ -73,7 +73,7 @@ Requires a **session JWT** (not an owner login token). Each item is a shop **nam
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/session/shops` | Session | List shops as `{ id, name, phone_number, show_phone }`. Default hides numbers (`phone_number` is `null`, `show_phone` is `false`). Pass `show_phone=true` to reveal every number. Optional `city` + `locality` (both together) to filter. |
+| `GET` | `/session/shops` | Session | List shops as `{ id, name, phone_number, show_phone }`. Default hides numbers. Pass `show_phone=true` to reveal numbers. Pass `shop_id` (or `store_id`) to toggle **one** shop: `/session/shops?shop_id=<id>&show_phone=true`. Optional `city` + `locality` (both together) to filter. |
 | `GET` | `/session/shops/{shop_id}` | Session | One shop. Default hides the number; `show_phone=true` reveals that shop’s mobile. |
 
 **Hidden (toggle off):**
@@ -86,7 +86,7 @@ Requires a **session JWT** (not an owner login token). Each item is a shop **nam
 { "id": "...", "name": "Ram Kirana", "phone_number": "+919876543210", "show_phone": true }
 ```
 
-Front-end: bind a switch per shop. Off → `GET /session/shops/{id}`. On → `GET /session/shops/{id}?show_phone=true`. Catalog `GET /shops*` with a session token also hides `phone_number` unless `show_phone=true`. Owner JWTs still always receive the number.
+Front-end: bind a switch per shop. Off → `GET /session/shops?shop_id=<id>`. On → `GET /session/shops?shop_id=<id>&show_phone=true` (or `GET /session/shops/{id}?show_phone=true`). Catalog `GET /shops?shop_id=<id>&show_phone=true` also works. Owner JWTs still always receive the number.
 
 ---
 
@@ -228,8 +228,8 @@ Extra product capacity for a shop after its plan allowance is used. Sold in pack
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/product-bucket?store_id=` | Bearer (user) | Capacity for a shop: plan limit, products count, purchased extra slots, remaining. |
-| `POST` | `/product-bucket/purchase` | Bearer (user) | Start pack purchase. Body: `{ "store_id": "<shop_id>", "packs": 1 }`. Returns pending payment. |
+| `GET` | `/product-bucket` | Bearer (user) | Capacity for a shop. Query: `store_id` / `shop_id`, and/or `product_id` (looks up that product's shop). |
+| `POST` | `/product-bucket/purchase` | Bearer (user) | Start pack purchase. Body: `{ "store_id": "<shop_id>", "packs": 1 }` or `{ "product_id": "<product_id>", "packs": 1 }`. Returns pending payment. |
 | `POST` | `/product-bucket/slots` | Bearer (user) | Alias of `/purchase` (pending payment). Admins apply packs immediately. |
 
 Then call `POST /payments/{payment_id}/complete` to add the slots. Total capacity = shop plan `max_products` + `extra_slots`.
