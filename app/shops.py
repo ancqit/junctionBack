@@ -48,6 +48,7 @@ class ShopCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     city: str = Field(min_length=1, max_length=80)
     locality: str = Field(min_length=1, max_length=120)
+    address: str | None = Field(default=None, max_length=240, description="Street / shop address line")
     open_time: str = Field(min_length=4, max_length=5, description="Shop open time HH:MM (24h)")
     closed_time: str = Field(min_length=4, max_length=5, description="Shop closed time HH:MM (24h)")
     is_open: bool = True
@@ -67,6 +68,14 @@ class ShopCreate(BaseModel):
     def strip_locality(cls, value: str) -> str:
         return _strip_required(value, "locality")
 
+    @field_validator("address")
+    @classmethod
+    def strip_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
     @field_validator("open_time")
     @classmethod
     def validate_open_time(cls, value: str) -> str:
@@ -82,6 +91,7 @@ class ShopUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     city: str | None = Field(default=None, min_length=1, max_length=80)
     locality: str | None = Field(default=None, min_length=1, max_length=120)
+    address: str | None = Field(default=None, max_length=240)
     open_time: str | None = Field(default=None, min_length=4, max_length=5)
     closed_time: str | None = Field(default=None, min_length=4, max_length=5)
     is_open: bool | None = None
@@ -95,6 +105,14 @@ class ShopUpdate(BaseModel):
         if not value:
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("address")
+    @classmethod
+    def strip_optional_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
     @field_validator("open_time", "closed_time")
     @classmethod
@@ -125,6 +143,7 @@ class Shop(BaseModel):
     name: str
     city: str
     locality: str
+    address: str | None = None
     open_time: str | None = None
     closed_time: str | None = None
     is_open: bool = True
@@ -139,11 +158,17 @@ def serialize_shop(document: dict) -> Shop:
     plan_summary = None
     if document.get("plan") is not None:
         plan_summary = build_shop_plan_summary(document)
+    address = document.get("address")
+    if isinstance(address, str):
+        address = address.strip() or None
+    else:
+        address = None
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
         city=document.get("city", ""),
         locality=document.get("locality", ""),
+        address=address,
         open_time=document.get("open_time"),
         closed_time=document.get("closed_time"),
         is_open=bool(document.get("is_open", True)),
@@ -338,6 +363,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "name": payload.name,
         "city": city,
         "locality": locality,
+        "address": payload.address,
         "open_time": payload.open_time,
         "closed_time": payload.closed_time,
         "is_open": payload.is_open,
