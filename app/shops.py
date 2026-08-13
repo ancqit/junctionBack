@@ -147,14 +147,14 @@ class Shop(BaseModel):
     open_time: str | None = None
     closed_time: str | None = None
     is_open: bool = True
-    phone_number: str
+    phone_number: str | None = None
     owner_user_id: str
     plan: PlanSummary | None = None
     created_at: datetime
     updated_at: datetime
 
 
-def serialize_shop(document: dict) -> Shop:
+def serialize_shop(document: dict, *, include_phone: bool = True) -> Shop:
     plan_summary = None
     if document.get("plan") is not None:
         plan_summary = build_shop_plan_summary(document)
@@ -172,7 +172,7 @@ def serialize_shop(document: dict) -> Shop:
         open_time=document.get("open_time"),
         closed_time=document.get("closed_time"),
         is_open=bool(document.get("is_open", True)),
-        phone_number=document["phone_number"],
+        phone_number=document.get("phone_number") if include_phone else None,
         owner_user_id=document["owner_user_id"],
         plan=plan_summary,
         created_at=document["created_at"],
@@ -206,6 +206,13 @@ def ensure_shop_indexes() -> None:
     shops.create_index("phone_number")
 
 
+def include_phone_number(auth: dict, show_phone: bool) -> bool:
+    """Owner/admin JWTs always see phones; session catalog needs the show_phone toggle."""
+    if not is_junction_session(auth):
+        return True
+    return show_phone
+
+
 def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
     name = shop_name.strip()
     if not name:
@@ -236,25 +243,40 @@ def list_shop_types(_: CatalogReader) -> list[ShopTypeInfo]:
 
 
 @router.get("", response_model=list[Shop])
-def list_shops(auth: CatalogReader) -> list[Shop]:
+def list_shops(
+    auth: CatalogReader,
+    show_phone: bool = Query(
+        False,
+        description="For junction.today session: reveal shop mobile numbers when true",
+    ),
+) -> list[Shop]:
     """
     List shops.
     - User JWT: owner sees own shops; admin sees all.
     - junction.today session JWT: public catalog of all shops.
+      Mobile numbers are hidden unless show_phone=true.
     """
+    with_phone = include_phone_number(auth, show_phone)
     if is_junction_session(auth):
         documents = shops.find({}).sort("created_at", -1)
-        return [serialize_shop(document) for document in documents]
+        return [serialize_shop(document, include_phone=with_phone) for document in documents]
 
     current_user = auth["user"]
     role = get_user_role(current_user)
     query = {} if role == UserRole.admin else {"owner_user_id": str(current_user["_id"])}
     documents = shops.find(query).sort("created_at", -1)
-    return [serialize_shop(document) for document in documents]
+    return [serialize_shop(document, include_phone=with_phone) for document in documents]
 
 
 @router.get("/by-name/{shop_name}", response_model=list[Shop])
-def get_shops_by_name(shop_name: str, auth: CatalogReader) -> list[Shop]:
+def get_shops_by_name(
+    shop_name: str,
+    auth: CatalogReader,
+    show_phone: bool = Query(
+        False,
+        description="For junction.today session: reveal shop mobile numbers when true",
+    ),
+) -> list[Shop]:
     name = shop_name.strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="shop_name must not be blank")
@@ -270,7 +292,8 @@ def get_shops_by_name(shop_name: str, auth: CatalogReader) -> list[Shop]:
     documents = list(shops.find(query).sort("created_at", -1))
     if not documents:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No shops found with this name")
-    return [serialize_shop(document) for document in documents]
+    with_phone = include_phone_number(auth, show_phone)
+    return [serialize_shop(document, include_phone=with_phone) for document in documents]
 
 
 @router.get("/by-location", response_model=list[Shop])
@@ -278,6 +301,10 @@ def list_shops_by_location(
     auth: CatalogReader,
     city: str = Query(..., min_length=1, max_length=80),
     locality: str = Query(..., min_length=1, max_length=120),
+    show_phone: bool = Query(
+        False,
+        description="For junction.today session: reveal shop mobile numbers when true",
+    ),
 ) -> list[Shop]:
     """
     List shops in a city + locality.
@@ -302,7 +329,8 @@ def list_shops_by_location(
             query["owner_user_id"] = str(current_user["_id"])
 
     documents = shops.find(query).sort("created_at", -1)
-    return [serialize_shop(document) for document in documents]
+    with_phone = include_phone_number(auth, show_phone)
+    return [serialize_shop(document, include_phone=with_phone) for document in documents]
 
 
 @router.put("/open-status", response_model=Shop)
@@ -322,13 +350,20 @@ def update_shop_open_status(
 
 
 @router.get("/{shop_id}", response_model=Shop)
-def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
+def get_shop(
+    shop_id: str,
+    auth: CatalogReader,
+    show_phone: bool = Query(
+        False,
+        description="For junction.today session: reveal this shop's mobile number when true",
+    ),
+) -> Shop:
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     if not is_junction_session(auth):
         ensure_shop_access(auth["user"], document)
-    return serialize_shop(document)
+    return serialize_shop(document, include_phone=include_phone_number(auth, show_phone))
 
 
 @router.get("/{shop_id}/products", response_model=list[Product])

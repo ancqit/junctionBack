@@ -1,17 +1,19 @@
 """Short-lived guest sessions for junction.today (no user login)."""
 
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from .database import sessions
+from .database import sessions, shops
 from .login import JWT_SECRET, oauth2_scheme
 from .rate_limit import RATE_LIMIT_AUTH, limiter
+from .utils import parse_object_id
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -26,6 +28,18 @@ class SessionResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int = Field(description="Seconds until the session JWT expires")
     audience: str = SESSION_AUDIENCE
+
+
+class SessionShopContact(BaseModel):
+    """Shop name plus optional mobile number for junction.today."""
+
+    id: str
+    name: str
+    phone_number: str | None = Field(
+        default=None,
+        description="Shop mobile number when show_phone is true; otherwise hidden",
+    )
+    show_phone: bool = Field(description="Whether the mobile number is currently visible")
 
 
 def _secret() -> str:
@@ -195,3 +209,70 @@ def create_session(request: Request) -> SessionResponse:
         expires_in=expires_in,
         audience=SESSION_AUDIENCE,
     )
+
+
+def _serialize_session_shop_contact(document: dict, *, show_phone: bool) -> SessionShopContact:
+    phone = document.get("phone_number")
+    if not show_phone or not isinstance(phone, str) or not phone.strip():
+        phone = None
+    else:
+        phone = phone.strip()
+    return SessionShopContact(
+        id=str(document["_id"]),
+        name=document["name"],
+        phone_number=phone,
+        show_phone=show_phone,
+    )
+
+
+def _session_shop_location_query(
+    city: str | None,
+    locality: str | None,
+) -> dict:
+    query: dict = {}
+    city_name = city.strip() if city else ""
+    locality_name = locality.strip() if locality else ""
+    if bool(city_name) != bool(locality_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="city and locality must be provided together",
+        )
+    if city_name and locality_name:
+        query["city"] = {"$regex": f"^{re.escape(city_name)}$", "$options": "i"}
+        query["locality"] = {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"}
+    return query
+
+
+@router.get("/shops", response_model=list[SessionShopContact])
+def list_session_shop_contacts(
+    _: JunctionSession,
+    show_phone: bool = Query(
+        False,
+        description="Toggle: true reveals each shop's mobile number; false hides it",
+    ),
+    city: str | None = Query(default=None, max_length=80),
+    locality: str | None = Query(default=None, max_length=120),
+) -> list[SessionShopContact]:
+    """
+    List shop names for junction.today. Mobile numbers stay hidden until
+    show_phone=true (the view/hide toggle).
+    """
+    query = _session_shop_location_query(city, locality)
+    documents = shops.find(query).sort("name", 1)
+    return [_serialize_session_shop_contact(document, show_phone=show_phone) for document in documents]
+
+
+@router.get("/shops/{shop_id}", response_model=SessionShopContact)
+def get_session_shop_contact(
+    shop_id: str,
+    _: JunctionSession,
+    show_phone: bool = Query(
+        False,
+        description="Toggle: true reveals this shop's mobile number; false hides it",
+    ),
+) -> SessionShopContact:
+    """One shop name with a per-shop toggle to view or hide its mobile number."""
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    return _serialize_session_shop_contact(document, show_phone=show_phone)
