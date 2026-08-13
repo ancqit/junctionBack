@@ -1,14 +1,12 @@
-"""Shop product bucket — plan-aligned capacity under user JWT (not guest session).
+"""Shop product bucket — extra product packs under a shop plan (user JWT only).
 
-Plans (junctionBack PLAN_CATALOG):
-  - starter: 10 products
-  - growth: 100 products
-  - premium: unlimited (null)
-  - free_trial: 150 products
+Plans live on the shop (see PLAN_CATALOG):
+  - free_trial: 40 products / 15 days
+  - starter: 10 products / INR 999 / 1 year
+  - growth: 80 products / INR 2999 / 1 year
+  - premium: 150 products / INR 599 / 1 year
 
-The bucket reports how many products a shop currently has vs plan capacity.
-When the shop has consumed the plan allowance, owners can POST extra slots
-so they can keep adding products without upgrading the plan immediately.
+Extra capacity is sold in packs of 40 products for INR 999 each.
 """
 
 from datetime import datetime, timezone
@@ -19,37 +17,45 @@ from pydantic import BaseModel, Field
 
 from .access_control import AuthenticatedUser, require_store_access
 from .database import product_buckets, products
-from .plan_service import PlanType, build_plan_summary, require_active_plan
+from .plan_service import PlanType, build_shop_plan_summary, get_shop_document, require_active_shop_plan
 from .roles import UserRole, get_user_role
 
 router = APIRouter(prefix="/product-bucket", tags=["product-bucket"])
 
-MAX_SLOTS_PER_REQUEST = 500
+BUCKET_PACK_SIZE = 40
+BUCKET_PACK_PRICE_INR = 999
+MAX_PACKS_PER_REQUEST = 50
 
 
 class ProductBucketResponse(BaseModel):
     store_id: str
     plan_type: PlanType
     plan_name: str
-    """Plan included product allowance (null = unlimited, e.g. Premium)."""
+    """Plan included product allowance."""
     plan_limit: int | None
     """Products currently listed for this shop."""
     products_count: int
-    """Extra capacity purchased/added beyond the plan limit."""
+    """Extra capacity from purchased packs (slots, not packs)."""
     extra_slots: int
-    """Total capacity = plan_limit + extra_slots (null = unlimited)."""
+    """Total capacity = plan_limit + extra_slots."""
     capacity: int | None
-    """Slots still available before hitting capacity (null = unlimited)."""
+    """Slots still available before hitting capacity."""
     remaining: int | None
     """True when another product can be created under current capacity."""
     can_add_product: bool
-    """True when plan allowance is fully used (extra slots are relevant)."""
+    """True when plan allowance is fully used (packs are relevant)."""
     plan_allowance_consumed: bool
+    pack_size: int = BUCKET_PACK_SIZE
+    pack_price_inr: int = BUCKET_PACK_PRICE_INR
 
 
-class AddBucketSlotsRequest(BaseModel):
+class AddBucketPacksRequest(BaseModel):
     store_id: str = Field(min_length=1, max_length=80)
-    quantity: int = Field(ge=1, le=MAX_SLOTS_PER_REQUEST)
+    packs: int = Field(
+        ge=1,
+        le=MAX_PACKS_PER_REQUEST,
+        description=f"Number of packs to add. Each pack = {BUCKET_PACK_SIZE} products for INR {BUCKET_PACK_PRICE_INR}.",
+    )
 
 
 def utc_now() -> datetime:
@@ -75,9 +81,10 @@ def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
     require_store_access(user, store_id)
 
     if get_user_role(user) == UserRole.admin:
-        summary = build_plan_summary(user)
+        shop = get_shop_document(store_id)
+        summary = build_shop_plan_summary(shop)
     else:
-        summary = require_active_plan(user)
+        _, summary = require_active_shop_plan(store_id)
 
     products_count = products.count_documents({"store_id": store_id})
     extra_slots = get_extra_slots(store_id)
@@ -105,6 +112,8 @@ def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
         remaining=remaining,
         can_add_product=can_add,
         plan_allowance_consumed=plan_allowance_consumed,
+        pack_size=BUCKET_PACK_SIZE,
+        pack_price_inr=BUCKET_PACK_PRICE_INR,
     )
 
 
@@ -113,37 +122,33 @@ def get_product_bucket(
     current_user: AuthenticatedUser,
     store_id: Annotated[str, Query(min_length=1, max_length=80)],
 ) -> ProductBucketResponse:
-    """
-    JWT-only. Returns product count for a shop vs plan-aligned bucket capacity.
-    Starter / Growth / Premium (and free trial) limits come from the owner's plan.
-    """
+    """JWT-only. Product count for a shop vs that shop's plan capacity + purchased packs."""
     return build_product_bucket(current_user, store_id)
 
 
 @router.post("/slots", response_model=ProductBucketResponse, status_code=status.HTTP_200_OK)
-def add_product_bucket_slots(
-    payload: AddBucketSlotsRequest,
+def add_product_bucket_packs(
+    payload: AddBucketPacksRequest,
     current_user: AuthenticatedUser,
 ) -> ProductBucketResponse:
     """
-    JWT-only. Add extra product capacity to the shop bucket after the plan
-    allowance has been consumed (Starter 10 / Growth 100 / …).
-    Premium (unlimited) does not need extra slots.
+    JWT-only. Buy extra product packs for a shop after plan allowance is used.
+    Each pack = 40 products for INR 999.
     """
     store_id = payload.store_id.strip()
     require_store_access(current_user, store_id)
-    summary = require_active_plan(current_user)
+    _, summary = require_active_shop_plan(store_id)
 
     if summary.profile_only:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your plan does not include products. Upgrade to add capacity.",
+            detail="This shop plan does not include products. Upgrade the shop plan first.",
         )
 
     if summary.max_products is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Your plan already allows unlimited products; extra bucket slots are not needed.",
+            detail="This shop plan already allows unlimited products; packs are not needed.",
         )
 
     products_count = products.count_documents({"store_id": store_id})
@@ -151,19 +156,24 @@ def add_product_bucket_slots(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"You still have plan allowance remaining "
+                f"This shop still has plan allowance remaining "
                 f"({products_count}/{summary.max_products}). "
-                "Extra bucket slots can be added after the plan products are used."
+                "Buy packs after the plan products are used."
             ),
         )
 
+    slots_to_add = payload.packs * BUCKET_PACK_SIZE
     _ensure_bucket_indexes()
     now = utc_now()
     product_buckets.update_one(
         {"store_id": store_id},
         {
-            "$inc": {"extra_slots": payload.quantity},
-            "$set": {"updated_at": now},
+            "$inc": {"extra_slots": slots_to_add, "packs_purchased": payload.packs},
+            "$set": {
+                "updated_at": now,
+                "last_pack_price_inr": BUCKET_PACK_PRICE_INR,
+                "pack_size": BUCKET_PACK_SIZE,
+            },
             "$setOnInsert": {"created_at": now, "store_id": store_id},
         },
         upsert=True,

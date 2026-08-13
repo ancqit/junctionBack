@@ -7,11 +7,13 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel
 from pymongo import ReturnDocument
 
-from .database import plan_applications, products, users
+from .database import plan_applications, products, shops, users
 from .roles import UserRole, get_user_role
+from .utils import parse_object_id
 
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
 GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
+PLAN_YEAR_DAYS = int(os.getenv("PLAN_YEAR_DAYS", os.getenv("PLAN_STARTER_DAYS", "365")))
 
 
 class PlanType(str, Enum):
@@ -33,34 +35,34 @@ PLAN_CATALOG: dict[str, dict] = {
     PlanType.free_trial.value: {
         "name": "Free Trial",
         "price_inr": 0,
-        "max_products": 150,
+        "max_products": 40,
         "profile_only": False,
-        "description": "Full access for 15 days",
+        "description": "Shop profile with up to 40 products for 15 days",
         "duration_days": TRIAL_DAYS,
     },
     PlanType.starter.value: {
         "name": "Starter",
-        "price_inr": 0,
+        "price_inr": 999,
         "max_products": 10,
         "profile_only": False,
-        "description": "Profile and up to 10 products",
-        "duration_days": None,
+        "description": "Shop profile with up to 10 products for 1 year (INR 999)",
+        "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.growth.value: {
         "name": "Growth",
-        "price_inr": 399,
-        "max_products": 100,
+        "price_inr": 2999,
+        "max_products": 80,
         "profile_only": False,
-        "description": "Add up to 100 products",
-        "duration_days": None,
+        "description": "Shop profile with up to 80 products for 1 year (INR 2999)",
+        "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.premium.value: {
         "name": "Premium",
         "price_inr": 599,
-        "max_products": None,
+        "max_products": 150,
         "profile_only": False,
-        "description": "Add more than 150 products",
-        "duration_days": None,
+        "description": "Shop profile with up to 150 products for 1 year (INR 599)",
+        "duration_days": PLAN_YEAR_DAYS,
     },
 }
 
@@ -420,11 +422,14 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial has already been used")
 
     now = utc_now()
+    details = PLAN_CATALOG[plan_type.value]
+    duration_days = details.get("duration_days")
+    ends_at = now + timedelta(days=duration_days) if duration_days else None
     plan_document = {
         "type": plan_type.value,
         "status": PlanStatus.active.value,
         "started_at": existing_plan.get("started_at", now),
-        "ends_at": None,
+        "ends_at": ends_at,
         "grace_ends_at": None,
         "grace_started_at": None,
         "viewing_applied": False,
@@ -599,12 +604,221 @@ def get_product_limit(user: dict) -> int | None:
     return summary.max_products
 
 
+def get_shop_document(store_id: str) -> dict:
+    shop = shops.find_one({"_id": parse_object_id(store_id, "Shop")})
+    if shop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    return shop
+
+
+def ensure_shop_has_plan(shop: dict) -> dict:
+    """Attach a free-trial plan to legacy shops that do not have one yet."""
+    if shop.get("plan"):
+        return shop
+    plan = default_plan_document()
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"]},
+        {"$set": {"plan": plan, "updated_at": utc_now()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or {**shop, "plan": plan}
+
+
+def expire_shop_trial_if_needed(shop: dict) -> dict:
+    plan = shop.get("plan")
+    if not plan:
+        return shop
+    if plan.get("type") != PlanType.free_trial.value or plan.get("status") != PlanStatus.active.value:
+        return shop
+    ends_at = plan.get("ends_at")
+    if ends_at is None:
+        return shop
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    if utc_now() < ends_at:
+        return shop
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"], "plan.status": PlanStatus.active.value, "plan.type": PlanType.free_trial.value},
+        {
+            "$set": {
+                "plan.status": PlanStatus.expired.value,
+                "plan.expired_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or shop
+
+
+def expire_shop_paid_plan_if_needed(shop: dict) -> dict:
+    plan = shop.get("plan")
+    if not plan or plan.get("status") != PlanStatus.active.value:
+        return shop
+    if not is_paid_plan(plan.get("type")):
+        return shop
+    ends_at = plan.get("ends_at")
+    if ends_at is None:
+        return shop
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    if utc_now() < ends_at:
+        return shop
+    now = utc_now()
+    grace_ends_at = now + timedelta(days=GRACE_DAYS)
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"], "plan.status": PlanStatus.active.value},
+        {
+            "$set": {
+                "plan.status": PlanStatus.grace_period.value,
+                "plan.selected_plan_type": plan.get("selected_plan_type") or plan.get("type"),
+                "plan.grace_started_at": now,
+                "plan.grace_ends_at": grace_ends_at,
+                "plan.expired_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or shop
+
+
+def expire_shop_grace_period_if_needed(shop: dict) -> dict:
+    plan = shop.get("plan")
+    if not plan or plan.get("status") != PlanStatus.grace_period.value:
+        return shop
+    grace_ends_at = plan.get("grace_ends_at")
+    if grace_ends_at is None:
+        return shop
+    if grace_ends_at.tzinfo is None:
+        grace_ends_at = grace_ends_at.replace(tzinfo=timezone.utc)
+    if utc_now() < grace_ends_at:
+        return shop
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"], "plan.status": PlanStatus.grace_period.value},
+        {
+            "$set": {
+                "plan.status": PlanStatus.expired.value,
+                "updated_at": utc_now(),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or shop
+
+
+def build_shop_plan_summary(shop: dict) -> PlanSummary:
+    shop = ensure_shop_has_plan(shop)
+    shop = expire_shop_trial_if_needed(shop)
+    shop = expire_shop_paid_plan_if_needed(shop)
+    shop = expire_shop_grace_period_if_needed(shop)
+    plan = shop.get("plan") or default_plan_document()
+    plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
+    selected_plan_type = plan.get("selected_plan_type")
+    if selected_plan_type is not None:
+        selected_plan_type = PlanType(selected_plan_type)
+    elif is_paid_plan(plan.get("type")):
+        selected_plan_type = plan_type
+    else:
+        selected_plan_type = None
+
+    details = PLAN_CATALOG[plan_type.value]
+    status = PlanStatus(plan.get("status", PlanStatus.active.value))
+    started_at = plan.get("started_at") or utc_now()
+    ends_at = plan.get("ends_at")
+    grace_ends_at = plan.get("grace_ends_at")
+    in_grace_period = status == PlanStatus.grace_period
+    is_active = status == PlanStatus.active
+    days_remaining = None
+    if ends_at is not None:
+        if ends_at.tzinfo is None:
+            ends_at = ends_at.replace(tzinfo=timezone.utc)
+        delta = ends_at - utc_now()
+        days_remaining = max(0, delta.days)
+        if status == PlanStatus.active and delta.total_seconds() <= 0:
+            is_active = False
+    if in_grace_period and grace_ends_at is not None:
+        if grace_ends_at.tzinfo is None:
+            grace_ends_at = grace_ends_at.replace(tzinfo=timezone.utc)
+        if utc_now() >= grace_ends_at:
+            is_active = False
+
+    return PlanSummary(
+        type=plan_type,
+        status=status,
+        name=details["name"],
+        price_inr=details["price_inr"],
+        max_products=details["max_products"],
+        profile_only=details["profile_only"],
+        description=details["description"],
+        started_at=started_at,
+        ends_at=ends_at,
+        days_remaining=days_remaining,
+        is_active=is_active,
+        trial_used=bool(plan.get("trial_used", False)),
+        selected_plan_type=selected_plan_type,
+        in_grace_period=in_grace_period,
+        grace_ends_at=grace_ends_at,
+    )
+
+
+def require_active_shop_plan(store_id: str) -> tuple[dict, PlanSummary]:
+    shop = get_shop_document(store_id)
+    summary = build_shop_plan_summary(shop)
+    shop = get_shop_document(store_id)
+    if not summary.is_active:
+        if summary.in_grace_period:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This shop's grace period has ended. Renew the shop plan to continue.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This shop's plan has expired. Choose a plan for the shop to continue.",
+        )
+    return shop, summary
+
+
+def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
+    shop = ensure_shop_has_plan(get_shop_document(store_id))
+    if plan_type == PlanType.free_trial:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial cannot be selected manually")
+
+    existing_plan = shop.get("plan") or {}
+    now = utc_now()
+    details = PLAN_CATALOG[plan_type.value]
+    duration_days = details.get("duration_days")
+    ends_at = now + timedelta(days=duration_days) if duration_days else None
+    plan_document = {
+        "type": plan_type.value,
+        "status": PlanStatus.active.value,
+        "started_at": existing_plan.get("started_at", now),
+        "ends_at": ends_at,
+        "grace_ends_at": None,
+        "grace_started_at": None,
+        "viewing_applied": False,
+        "trial_used": True,
+        "selected_plan_type": plan_type.value,
+        "selected_at": now,
+    }
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"]},
+        {"$set": {"plan": plan_document, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return build_shop_plan_summary(updated or shop)
+
+
 def ensure_can_add_product(user: dict, store_id: str) -> None:
-    summary = require_active_plan(user)
+    """Product limits come from the shop's plan (not the user account)."""
+    if get_user_role(user) == UserRole.admin:
+        return
+
+    _, summary = require_active_shop_plan(store_id)
     if summary.profile_only:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your Starter plan only includes a profile. Upgrade to add products.",
+            detail="This shop plan only includes a profile. Upgrade the shop plan to add products.",
         )
 
     max_products = summary.max_products
@@ -619,8 +833,8 @@ def ensure_can_add_product(user: dict, store_id: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"Your {summary.name} plan allows up to {max_products} products"
+                f"This shop's {summary.name} plan allows up to {max_products} products"
                 f" ({capacity} with bucket slots). "
-                "Add more capacity via POST /product-bucket/slots or upgrade your plan."
+                "Add more capacity via POST /product-bucket/slots or upgrade the shop plan."
             ),
         )

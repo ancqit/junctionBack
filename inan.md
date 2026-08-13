@@ -9,7 +9,7 @@ Authorization: Bearer <access_token>
 ```
 
 **Roles:** `admin`, `owner`, `viewer`  
-**Plans:** Free Trial, Starter, Growth, Premium — admins are exempt from all plan limits.
+**Plans:** Free Trial (40/15d), Starter (10/₹999/yr), Growth (80/₹2999/yr), Premium (150/₹599/yr) — attached to each **shop**. Extra packs: 40 products / ₹999. Admins are exempt from plan limits.
 
 **`store_id`** on products, employees, and orders = the **shop ID** from `/shops`.
 
@@ -128,20 +128,33 @@ Daily notice board for shop offers and announcements. One notice per shop per UT
 Shops are the main entry point. Products and employees are linked via `store_id` = shop `id`.
 
 **Ownership model**
-- **Phone / mobile number** = the user account (OTP login). One phone → one user.
-- That user may open **multiple shops**.
-- Each shop keeps a copy of the owner's `phone_number` for display/contact; it is **not** globally unique.
+- **Phone / mobile number** = the user account (OTP login). One phone → one user → **many shops**.
+- Shop names must be unique **per mobile number** (same phone cannot create two shops with the same name).
+- Each shop has its own **plan** (billing/limits live on the shop, not the phone).
 - **Products** and **employees** belong to a shop (`store_id`).
-- **Billing / plan** belongs to the **user (phone)**, not to an individual shop.
+
+**Shop plans** (billing and product limits live on each shop)
+| Plan | Products | Price | Duration |
+|------|----------|-------|----------|
+| Free Trial | 40 | INR 0 | 15 days |
+| Starter | 10 | INR 999 | 1 year |
+| Growth | 80 | INR 2999 | 1 year |
+| Premium | 150 | INR 599 | 1 year |
+
+**Extra product packs:** after a shop’s plan allowance is used, buy packs of **40 products for INR 999** via `POST /product-bucket/slots`.
+
+New shops start on **Free Trial**. Upgrade with `POST /shops/{shop_id}/plan/select`.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
 | `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
 | `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
+| `GET` | `/shops/{shop_id}/plan` | Bearer (user) | Get this shop's plan (limits/billing are per shop). |
+| `POST` | `/shops/{shop_id}/plan/select` | Bearer (user) | Select/upgrade shop plan. Body: `{ "plan_type": "starter" }`. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
-| `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. Name must be unique **per owner**. Phone is taken from the logged-in user. |
+| `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Starts on Free Trial (40 products / 15 days). Name must be unique **per mobile number**. Phone is taken from the logged-in user. |
 | `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
 | `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer (user) | Delete a shop. |
@@ -158,7 +171,7 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 | `GET` | `/products` | Bearer (user **or** session) | List products. Optional `store_id`. Owner JWT is shop-scoped; `junction.today` session sees the public catalog. |
 | `GET` | `/products/by-location` | Bearer (user **or** session) | List products for shops in a location. Query: `city`, `locality` (both required). |
 | `GET` | `/products/{product_id}` | Bearer (user **or** session) | Get one product by ID. |
-| `POST` | `/products` | Bearer (user) | Create product for a shop. Enforces plan product limits. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
+| `POST` | `/products` | Bearer (user) | Create product for a shop. Enforces **that shop’s** plan + bucket capacity. Body includes `store_id`, `sku`, `name`, `category`, `price`, stock, etc. |
 | `PUT` | `/products/{product_id}` | Bearer (user) | Update product fields (name, price, stock, status, image, etc.). |
 | `DELETE` | `/products/{product_id}` | Bearer (user) | Delete a product. |
 | `POST` | `/products/images/suggest` | Bearer (user) | Suggest up to **10** Pexels CDN images for a product name. Body: `{ "product_name": "wireless earbuds" }`. Requires active plan. |
@@ -176,6 +189,19 @@ Shop responses include `open_time`, `closed_time`, and `is_open` so the front en
 3. Or add one at a time via `/image/use` or `/image/upload`
 
 **Other image flows:** CDN link only → `/image/cdn` · Manual search → `/queries` + `/image/use`
+
+---
+
+## Product bucket (`/product-bucket`)
+
+Extra product capacity for a shop after its plan allowance is used. Sold in packs of **40 products for INR 999**.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/product-bucket?store_id=` | Bearer (user) | Capacity for a shop: plan limit, products count, purchased extra slots, remaining. |
+| `POST` | `/product-bucket/slots` | Bearer (user) | Buy packs. Body: `{ "store_id": "<shop_id>", "packs": 1 }`. Each pack adds 40 slots (INR 999). Only after plan products are fully used. |
+
+Total capacity = shop plan `max_products` + `extra_slots`. Creating products (`POST /products`) enforces this total.
 
 ---
 
@@ -290,12 +316,17 @@ Existing seeded/known localities skip re-geocoding.
 4. **Viewers** join the waitlist (`POST /waitlist` or `POST /plans/apply`); admin activates via `POST /admin/users/{id}/activate` (requires pending waitlist entry)
 5. Admin can delete `viewer` accounts only — **shop owners can never be deleted**
 
-| Plan | Price | Products | Notes |
-|------|-------|----------|-------|
-| Free Trial | ₹0 | 150 | 15 days full access |
-| Starter | ₹0 | 10 | Profile and up to 10 products |
-| Growth | ₹399 | 100 | |
-| Premium | ₹599 | 150+ | Unlimited |
+**Canonical shop plan catalog** (same numbers as `GET /plans` / shop plan select):
+
+| Plan | Price | Products | Duration |
+|------|-------|----------|----------|
+| Free Trial | ₹0 | 40 | 15 days |
+| Starter | ₹999 | 10 | 1 year |
+| Growth | ₹2999 | 80 | 1 year |
+| Premium | ₹599 | 150 | 1 year |
+| Product pack (bucket) | ₹999 | +40 | add-on per shop |
+
+Prefer **`GET/POST /shops/{shop_id}/plan*`** for limits. Legacy **`/plans/me`** and **`POST /plans/select`** still operate on the user document for waitlist/onboarding.
 
 ---
 
@@ -358,10 +389,12 @@ Early demo CRUD — not tied to shops.
 
 ### New shop owner (OTP login)
 1. `POST /auth/otp/request` → `POST /auth/otp/verify` (get token + plan + role) — phone is the account
-2. `POST /shops` as many times as needed (multiple shops per phone; unique name per owner)
-3. `POST /products` with `store_id` = chosen shop ID
-4. `POST /employees` with same `store_id`
-5. `POST /orders` when a sale is made (billing/plan remains on the phone/user)
+2. `POST /shops` as many times as needed (multiple shops per phone; unique name per phone)
+3. Optional: `POST /shops/{shop_id}/plan/select` with `{ "plan_type": "starter" }` (or growth/premium)
+4. `POST /products` with `store_id` = chosen shop ID (limits from that shop’s plan + packs)
+5. When plan products are full: `POST /product-bucket/slots` with `{ "store_id": "...", "packs": 1 }`
+6. `POST /employees` with same `store_id`
+7. `POST /orders` when a sale is made
 
 ### Add product images
 1. `GET /queries?query=shirt&per_page=10` or `POST /products/images/suggest` → pick up to 5 CDN URLs

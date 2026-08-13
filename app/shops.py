@@ -11,6 +11,13 @@ from .access_control import ensure_shop_access
 from .database import products, shops
 from .locations import ensure_city_and_locality
 from .login import get_current_user
+from .plan_service import (
+    PlanSummary,
+    PlanType,
+    build_shop_plan_summary,
+    default_plan_document,
+    select_plan_for_shop,
+)
 from .products import Product, serialize_product
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
@@ -106,6 +113,10 @@ class ShopOpenStatusUpdate(BaseModel):
         return _strip_required(value, "name")
 
 
+class ShopPlanSelectRequest(BaseModel):
+    plan_type: PlanType
+
+
 class Shop(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -118,11 +129,15 @@ class Shop(BaseModel):
     is_open: bool = True
     phone_number: str
     owner_user_id: str
+    plan: PlanSummary | None = None
     created_at: datetime
     updated_at: datetime
 
 
 def serialize_shop(document: dict) -> Shop:
+    plan_summary = None
+    if document.get("plan") is not None:
+        plan_summary = build_shop_plan_summary(document)
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
@@ -133,6 +148,7 @@ def serialize_shop(document: dict) -> Shop:
         is_open=bool(document.get("is_open", True)),
         phone_number=document["phone_number"],
         owner_user_id=document["owner_user_id"],
+        plan=plan_summary,
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
@@ -151,9 +167,10 @@ def get_user_phone_number(user: dict) -> str:
 def ensure_shop_indexes() -> None:
     """
     One mobile/user may own many shops.
-    Unique only on (owner_user_id, name). phone_number is indexed but not unique.
+    Shop names must be unique per phone number (and per owner).
     """
     shops.create_index([("owner_user_id", 1), ("name", 1)], unique=True)
+    shops.create_index([("phone_number", 1), ("name", 1)], unique=True)
     shops.create_index("owner_user_id")
     # Drop legacy unique phone index if present (blocked multi-shop per number).
     for index in shops.list_indexes():
@@ -325,6 +342,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "is_open": payload.is_open,
         "phone_number": phone_number,
         "owner_user_id": str(current_user["_id"]),
+        "plan": default_plan_document(),
         "created_at": now,
         "updated_at": now,
     }
@@ -333,10 +351,34 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     except DuplicateKeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="You already have a shop with this name",
+            detail="This mobile number already has a shop with this name",
         ) from exc
     document["_id"] = result.inserted_id
     return serialize_shop(document)
+
+
+@router.get("/{shop_id}/plan", response_model=PlanSummary)
+def get_shop_plan(shop_id: str, current_user: Annotated[dict, Depends(get_current_user)]) -> PlanSummary:
+    """Return the plan attached to this shop (plan lives on the shop, not the phone)."""
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    ensure_shop_access(current_user, document)
+    return build_shop_plan_summary(document)
+
+
+@router.post("/{shop_id}/plan/select", response_model=PlanSummary)
+def select_shop_plan(
+    shop_id: str,
+    payload: ShopPlanSelectRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> PlanSummary:
+    """Select/upgrade the plan for a shop (e.g. starter)."""
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    ensure_shop_access(current_user, document)
+    return select_plan_for_shop(str(document["_id"]), payload.plan_type)
 
 
 @router.put("/{shop_id}", response_model=Shop)
@@ -369,7 +411,10 @@ def update_shop(
             return_document=ReturnDocument.AFTER,
         )
     except DuplicateKeyError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A shop with this name already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This mobile number already has a shop with this name",
+        ) from exc
     return serialize_shop(document)
 
 
