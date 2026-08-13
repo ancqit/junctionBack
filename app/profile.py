@@ -1,18 +1,24 @@
 from datetime import date, datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
+from gridfs import GridFS
+from gridfs.errors import NoFile
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
 from pymongo import ReturnDocument
 
-from .database import notices, shops, users
+from .database import database, notices, shops, users
 from .access_control import AuthenticatedUser, ensure_shop_access, require_store_access
 from .login import get_current_user
+from .product_images import validate_image_upload
 from .roles import UserRole, get_user_role
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 notices_router = APIRouter(prefix="/notices", tags=["notices"])
+
+profile_avatar_fs = GridFS(database, collection="profile_avatars")
 
 
 class Profile(BaseModel):
@@ -72,6 +78,51 @@ def update_profile(payload: ProfileUpdate, current_user: Annotated[dict, Depends
     changes["updated_at"] = datetime.now(timezone.utc)
     user = users.find_one_and_update({"_id": current_user["_id"]}, {"$set": changes}, return_document=ReturnDocument.AFTER)
     return serialize_profile(user)
+
+
+@router.post("/avatar", response_model=Profile, status_code=status.HTTP_200_OK)
+async def upload_profile_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+) -> Profile:
+    """Upload a shop/profile photo from device. Stores in GridFS and sets avatar_url."""
+    contents = await file.read()
+    content_type = validate_image_upload(file, contents)
+    file_id = profile_avatar_fs.put(
+        contents,
+        content_type=content_type,
+        filename=file.filename or "avatar.jpg",
+        metadata={"user_id": str(current_user["_id"]), "source": "upload"},
+    )
+    base = str(request.base_url).rstrip("/")
+    avatar_url = f"{base}/profile/avatar/file/{file_id}"
+    user = users.find_one_and_update(
+        {"_id": current_user["_id"]},
+        {
+            "$set": {
+                "avatar_url": avatar_url,
+                "avatar_stored_image_id": str(file_id),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return serialize_profile(user)
+
+
+@router.get("/avatar/file/{stored_image_id}")
+def get_profile_avatar_file(stored_image_id: str) -> StreamingResponse:
+    """Public read for profile photos (used in <img src>)."""
+    try:
+        grid_out = profile_avatar_fs.get(parse_object_id(stored_image_id, "Avatar"))
+    except (NoFile, Exception):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not found")
+    return StreamingResponse(
+        grid_out,
+        media_type=grid_out.content_type or "image/jpeg",
+        headers={"Content-Disposition": f'inline; filename="{grid_out.filename or "avatar.jpg"}"'},
+    )
 
 
 class NoticeCreate(BaseModel):

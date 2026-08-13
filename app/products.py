@@ -18,6 +18,7 @@ from .access_control import (
 )
 from .database import products, shops
 from .plan_service import ensure_can_add_product, require_active_plan
+from .product_categories import PRODUCT_CATEGORIES, ProductCategoryInfo
 from .product_images import (
     delete_product_image,
     fetch_image_from_cdn,
@@ -339,6 +340,12 @@ async def store_product_image_from_cdn(
         content_type=stored.content_type,
         filename=stored.filename,
     )
+
+
+@router.get("/categories", response_model=list[ProductCategoryInfo])
+def list_product_categories(_: CatalogReader) -> list[ProductCategoryInfo]:
+    """Product category catalog for owner app and junction.today pickers."""
+    return PRODUCT_CATEGORIES
 
 
 @router.post("/images/suggest", response_model=ProductImageSuggestResponse, status_code=status.HTTP_200_OK)
