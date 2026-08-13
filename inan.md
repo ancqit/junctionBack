@@ -350,11 +350,11 @@ Early demo CRUD — not tied to shops.
 ## Typical flows
 
 ### New shop owner (OTP login)
-1. `POST /auth/otp/request` → `POST /auth/otp/verify` (get token + plan + role)
-2. `POST /shops` with shop name
-3. `POST /products` with `store_id` = shop ID
+1. `POST /auth/otp/request` → `POST /auth/otp/verify` (get token + plan + role) — phone is the account
+2. `POST /shops` as many times as needed (multiple shops per phone; unique name per owner)
+3. `POST /products` with `store_id` = chosen shop ID
 4. `POST /employees` with same `store_id`
-5. `POST /orders` when a sale is made
+5. `POST /orders` when a sale is made (billing/plan remains on the phone/user)
 
 ### Add product images
 1. `GET /queries?query=shirt&per_page=10` or `POST /products/images/suggest` → pick up to 5 CDN URLs

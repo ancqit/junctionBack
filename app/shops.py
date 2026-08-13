@@ -148,6 +148,21 @@ def get_user_phone_number(user: dict) -> str:
     return phone_number
 
 
+def ensure_shop_indexes() -> None:
+    """
+    One mobile/user may own many shops.
+    Unique only on (owner_user_id, name). phone_number is indexed but not unique.
+    """
+    shops.create_index([("owner_user_id", 1), ("name", 1)], unique=True)
+    shops.create_index("owner_user_id")
+    # Drop legacy unique phone index if present (blocked multi-shop per number).
+    for index in shops.list_indexes():
+        if index.get("name") == "phone_number_1" and index.get("unique"):
+            shops.drop_index("phone_number_1")
+            break
+    shops.create_index("phone_number")
+
+
 def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
     name = shop_name.strip()
     if not name:
@@ -292,8 +307,11 @@ def list_products_for_shop(shop_id: str, auth: CatalogReader) -> list[Product]:
 
 @router.post("", response_model=Shop, status_code=status.HTTP_201_CREATED)
 def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_current_user)]) -> Shop:
-    shops.create_index([("owner_user_id", 1), ("name", 1)], unique=True)
-    shops.create_index("phone_number", unique=True)
+    """
+    Create a shop for the logged-in mobile user.
+    One phone/user may own multiple shops; shop names must be unique per owner.
+    """
+    ensure_shop_indexes()
 
     city, locality = ensure_city_and_locality(payload.city, payload.locality)
     phone_number = get_user_phone_number(current_user)
@@ -315,7 +333,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     except DuplicateKeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A shop with this name or phone number already exists",
+            detail="You already have a shop with this name",
         ) from exc
     document["_id"] = result.inserted_id
     return serialize_shop(document)
