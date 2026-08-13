@@ -65,7 +65,8 @@ class EmergencyContact(BaseModel):
 
 class EmployeeCreate(BaseModel):
     store_id: str = Field(min_length=1, max_length=80)
-    employee_code: str = Field(min_length=1, max_length=40)
+    """Optional — server assigns EMP-… when omitted."""
+    employee_code: str | None = Field(default=None, min_length=1, max_length=40)
     first_name: str = Field(min_length=1, max_length=80)
     last_name: str = Field(min_length=1, max_length=80)
     email: EmailStr | None = None
@@ -83,7 +84,17 @@ class EmployeeCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
     avatar_url: HttpUrl | None = None
 
-    @field_validator("employee_code", "first_name", "last_name", "role", "department")
+    @field_validator("employee_code")
+    @classmethod
+    def strip_optional_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("first_name", "last_name", "role", "department")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         value = value.strip()
@@ -133,6 +144,7 @@ class EmployeeUpdate(BaseModel):
 class Employee(EmployeeCreate):
     model_config = ConfigDict(populate_by_name=True)
 
+    employee_code: str = Field(min_length=1, max_length=40)
     id: str
     created_at: datetime
     updated_at: datetime
@@ -192,12 +204,31 @@ def create_employee(payload: EmployeeCreate, current_user: AuthenticatedUser) ->
 
     now = datetime.now(timezone.utc)
     document = {**payload.model_dump(mode="json"), "created_at": now, "updated_at": now}
+    if not document.get("employee_code"):
+        document["employee_code"] = _next_employee_code(payload.store_id)
     try:
         result = employees.insert_one(document)
     except DuplicateKeyError:
-        raise HTTPException(status_code=409, detail="An employee with this code already exists for the store")
+        # Rare race on auto code — retry once with a fresh suffix.
+        if payload.employee_code:
+            raise HTTPException(status_code=409, detail="An employee with this code already exists for the store")
+        document["employee_code"] = _next_employee_code(payload.store_id)
+        try:
+            result = employees.insert_one(document)
+        except DuplicateKeyError:
+            raise HTTPException(status_code=409, detail="Could not allocate a unique employee code; try again")
     document["_id"] = result.inserted_id
     return serialize_employee(document)
+
+
+def _next_employee_code(store_id: str) -> str:
+    """Generate EMP-XXXX unique within the store."""
+    count = employees.count_documents({"store_id": store_id.strip()})
+    for offset in range(0, 50):
+        code = f"EMP-{count + 1 + offset:04d}"
+        if employees.find_one({"store_id": store_id.strip(), "employee_code": code}) is None:
+            return code
+    return f"EMP-{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S')}"
 
 
 @router.put("/{employee_id}", response_model=Employee)
