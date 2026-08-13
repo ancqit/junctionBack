@@ -127,6 +127,13 @@ Daily notice board for shop offers and announcements. One notice per shop per UT
 
 Shops are the main entry point. Products and employees are linked via `store_id` = shop `id`.
 
+**Ownership model**
+- **Phone / mobile number** = the user account (OTP login). One phone → one user.
+- That user may open **multiple shops**.
+- Each shop keeps a copy of the owner's `phone_number` for display/contact; it is **not** globally unique.
+- **Products** and **employees** belong to a shop (`store_id`).
+- **Billing / plan** belongs to the **user (phone)**, not to an individual shop.
+
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. |
@@ -134,7 +141,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
-| `POST` | `/shops` | Bearer (user) | Create shop. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. `open_time` / `closed_time` are required (`HH:MM` 24h). `is_open` defaults to `true`. Phone from logged-in user and **cannot be changed later**. |
+| `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Body: `{ "name": "...", "city": "...", "locality": "...", "open_time": "09:00", "closed_time": "21:00", "is_open": true }`. Name must be unique **per owner**. Phone is taken from the logged-in user. |
 | `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
 | `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer (user) | Delete a shop. |
