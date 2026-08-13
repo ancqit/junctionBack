@@ -23,7 +23,7 @@ from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .shop_payments import PlanPurchaseRequest, ShopPayment, create_plan_purchase
 from .shop_types import SHOP_TYPES, ShopTypeInfo
-from .utils import parse_object_id, ShowPhone
+from .utils import parse_object_id
 
 router = APIRouter(prefix="/shops", tags=["shops"])
 
@@ -52,6 +52,7 @@ class ShopCreate(BaseModel):
     open_time: str = Field(min_length=4, max_length=5, description="Shop open time HH:MM (24h)")
     closed_time: str = Field(min_length=4, max_length=5, description="Shop closed time HH:MM (24h)")
     is_open: bool = True
+    show_phone: bool = False
 
     @field_validator("name")
     @classmethod
@@ -95,6 +96,7 @@ class ShopUpdate(BaseModel):
     open_time: str | None = Field(default=None, min_length=4, max_length=5)
     closed_time: str | None = Field(default=None, min_length=4, max_length=5)
     is_open: bool | None = None
+    show_phone: bool | None = None
 
     @field_validator("name", "city", "locality")
     @classmethod
@@ -132,6 +134,16 @@ class ShopOpenStatusUpdate(BaseModel):
         return _strip_required(value, "name")
 
 
+class ShopPhoneStatusUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    show_phone: bool
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        return _strip_required(value, "name")
+
+
 class ShopPlanSelectRequest(BaseModel):
     plan_type: PlanType
 
@@ -147,6 +159,7 @@ class Shop(BaseModel):
     open_time: str | None = None
     closed_time: str | None = None
     is_open: bool = True
+    show_phone: bool = False
     phone_number: str | None = None
     owner_user_id: str
     plan: PlanSummary | None = None
@@ -154,7 +167,7 @@ class Shop(BaseModel):
     updated_at: datetime
 
 
-def serialize_shop(document: dict, *, include_phone: bool = True) -> Shop:
+def serialize_shop(document: dict) -> Shop:
     plan_summary = None
     if document.get("plan") is not None:
         plan_summary = build_shop_plan_summary(document)
@@ -163,6 +176,11 @@ def serialize_shop(document: dict, *, include_phone: bool = True) -> Shop:
         address = address.strip() or None
     else:
         address = None
+    phone = document.get("phone_number")
+    if isinstance(phone, str):
+        phone = phone.strip() or None
+    else:
+        phone = None
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
@@ -172,7 +190,8 @@ def serialize_shop(document: dict, *, include_phone: bool = True) -> Shop:
         open_time=document.get("open_time"),
         closed_time=document.get("closed_time"),
         is_open=bool(document.get("is_open", True)),
-        phone_number=document.get("phone_number") if include_phone else None,
+        show_phone=bool(document.get("show_phone", False)),
+        phone_number=phone,
         owner_user_id=document["owner_user_id"],
         plan=plan_summary,
         created_at=document["created_at"],
@@ -204,13 +223,6 @@ def ensure_shop_indexes() -> None:
             shops.drop_index("phone_number_1")
             break
     shops.create_index("phone_number")
-
-
-def include_phone_number(auth: dict, show_phone: bool) -> bool:
-    """Owner/admin JWTs always see phones; session catalog needs the show_phone toggle."""
-    if not is_junction_session(auth):
-        return True
-    return show_phone
 
 
 def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
@@ -245,7 +257,6 @@ def list_shop_types(_: CatalogReader) -> list[ShopTypeInfo]:
 @router.get("", response_model=list[Shop])
 def list_shops(
     auth: CatalogReader,
-    show_phone: ShowPhone,
     shop_id: str | None = Query(default=None, max_length=80, description="Return this shop only"),
     store_id: str | None = Query(default=None, max_length=80, description="Alias of shop_id"),
 ) -> list[Shop]:
@@ -253,10 +264,9 @@ def list_shops(
     List shops.
     - User JWT: owner sees own shops; admin sees all.
     - junction.today session JWT: public catalog of all shops.
-      Mobile numbers are hidden unless show_phone=true.
     - Optional shop_id/store_id query returns that one shop.
+    Shop JSON includes show_phone (boolean switch) and phone_number (never nulled by the switch).
     """
-    with_phone = include_phone_number(auth, show_phone)
     requested = (shop_id or store_id or "").strip()
     if shop_id and store_id and shop_id.strip() != store_id.strip():
         raise HTTPException(
@@ -269,24 +279,23 @@ def list_shops(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
         if not is_junction_session(auth):
             ensure_shop_access(auth["user"], document)
-        return [serialize_shop(document, include_phone=with_phone)]
+        return [serialize_shop(document)]
 
     if is_junction_session(auth):
         documents = shops.find({}).sort("created_at", -1)
-        return [serialize_shop(document, include_phone=with_phone) for document in documents]
+        return [serialize_shop(document) for document in documents]
 
     current_user = auth["user"]
     role = get_user_role(current_user)
     query = {} if role == UserRole.admin else {"owner_user_id": str(current_user["_id"])}
     documents = shops.find(query).sort("created_at", -1)
-    return [serialize_shop(document, include_phone=with_phone) for document in documents]
+    return [serialize_shop(document) for document in documents]
 
 
 @router.get("/by-name/{shop_name}", response_model=list[Shop])
 def get_shops_by_name(
     shop_name: str,
     auth: CatalogReader,
-    show_phone: ShowPhone,
 ) -> list[Shop]:
     name = shop_name.strip()
     if not name:
@@ -303,14 +312,12 @@ def get_shops_by_name(
     documents = list(shops.find(query).sort("created_at", -1))
     if not documents:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No shops found with this name")
-    with_phone = include_phone_number(auth, show_phone)
-    return [serialize_shop(document, include_phone=with_phone) for document in documents]
+    return [serialize_shop(document) for document in documents]
 
 
 @router.get("/by-location", response_model=list[Shop])
 def list_shops_by_location(
     auth: CatalogReader,
-    show_phone: ShowPhone,
     city: str = Query(..., min_length=1, max_length=80),
     locality: str = Query(..., min_length=1, max_length=120),
 ) -> list[Shop]:
@@ -337,8 +344,7 @@ def list_shops_by_location(
             query["owner_user_id"] = str(current_user["_id"])
 
     documents = shops.find(query).sort("created_at", -1)
-    with_phone = include_phone_number(auth, show_phone)
-    return [serialize_shop(document, include_phone=with_phone) for document in documents]
+    return [serialize_shop(document) for document in documents]
 
 
 @router.put("/open-status", response_model=Shop)
@@ -357,18 +363,30 @@ def update_shop_open_status(
     return serialize_shop(document)
 
 
-@router.get("/{shop_id}", response_model=Shop)
-def get_shop(
-    shop_id: str,
-    auth: CatalogReader,
-    show_phone: ShowPhone,
+@router.put("/phone-status", response_model=Shop)
+def update_shop_phone_status(
+    payload: ShopPhoneStatusUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
 ) -> Shop:
+    """Toggle whether the shop mobile number is shown. Body: { "name": "...", "show_phone": true|false }."""
+    existing = find_owned_shop_by_name(current_user, payload.name)
+    ensure_shop_access(current_user, existing)
+    document = shops.find_one_and_update(
+        {"_id": existing["_id"]},
+        {"$set": {"show_phone": payload.show_phone, "updated_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return serialize_shop(document)
+
+
+@router.get("/{shop_id}", response_model=Shop)
+def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     if not is_junction_session(auth):
         ensure_shop_access(auth["user"], document)
-    return serialize_shop(document, include_phone=include_phone_number(auth, show_phone))
+    return serialize_shop(document)
 
 
 @router.get("/{shop_id}/products", response_model=list[Product])
@@ -407,6 +425,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "open_time": payload.open_time,
         "closed_time": payload.closed_time,
         "is_open": payload.is_open,
+        "show_phone": payload.show_phone,
         "phone_number": phone_number,
         "owner_user_id": str(current_user["_id"]),
         "plan": default_plan_document(),

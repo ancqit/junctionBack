@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .database import sessions, shops
 from .login import JWT_SECRET, oauth2_scheme
 from .rate_limit import RATE_LIMIT_AUTH, limiter
-from .utils import parse_object_id, ShowPhone
+from .utils import parse_object_id
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -31,15 +31,12 @@ class SessionResponse(BaseModel):
 
 
 class SessionShopContact(BaseModel):
-    """Shop name plus optional mobile number for junction.today."""
+    """Shop name, mobile number, and show_phone switch for junction.today."""
 
     id: str
     name: str
-    phone_number: str | None = Field(
-        default=None,
-        description="Shop mobile number when show_phone is true; otherwise hidden",
-    )
-    show_phone: bool = Field(description="Whether the mobile number is currently visible")
+    phone_number: str | None = Field(default=None, description="Shop mobile number")
+    show_phone: bool = Field(description="Boolean switch: whether the UI should display the mobile number")
 
 
 def _secret() -> str:
@@ -211,17 +208,17 @@ def create_session(request: Request) -> SessionResponse:
     )
 
 
-def _serialize_session_shop_contact(document: dict, *, show_phone: bool) -> SessionShopContact:
+def _serialize_session_shop_contact(document: dict) -> SessionShopContact:
     phone = document.get("phone_number")
-    if not show_phone or not isinstance(phone, str) or not phone.strip():
-        phone = None
+    if isinstance(phone, str):
+        phone = phone.strip() or None
     else:
-        phone = phone.strip()
+        phone = None
     return SessionShopContact(
         id=str(document["_id"]),
         name=document["name"],
         phone_number=phone,
-        show_phone=show_phone,
+        show_phone=bool(document.get("show_phone", False)),
     )
 
 
@@ -246,16 +243,14 @@ def _session_shop_location_query(
 @router.get("/shops", response_model=list[SessionShopContact])
 def list_session_shop_contacts(
     _: JunctionSession,
-    show_phone: ShowPhone,
     shop_id: str | None = Query(default=None, max_length=80, description="Return this shop only"),
     store_id: str | None = Query(default=None, max_length=80, description="Alias of shop_id"),
     city: str | None = Query(default=None, max_length=80),
     locality: str | None = Query(default=None, max_length=120),
 ) -> list[SessionShopContact]:
     """
-    List shop names for junction.today. Mobile numbers stay hidden until
-    show_phone=true (the view/hide toggle).
-    Pass shop_id (or store_id) to toggle one shop: /session/shops?shop_id=...&show_phone=true
+    List shop names for junction.today with phone_number and a show_phone boolean switch
+    (same idea as is_open). The switch does not null the number.
     """
     requested = (shop_id or store_id or "").strip()
     if shop_id and store_id and shop_id.strip() != store_id.strip():
@@ -267,21 +262,17 @@ def list_session_shop_contacts(
         document = shops.find_one({"_id": parse_object_id(requested, "Shop")})
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
-        return [_serialize_session_shop_contact(document, show_phone=show_phone)]
+        return [_serialize_session_shop_contact(document)]
 
     query = _session_shop_location_query(city, locality)
     documents = shops.find(query).sort("name", 1)
-    return [_serialize_session_shop_contact(document, show_phone=show_phone) for document in documents]
+    return [_serialize_session_shop_contact(document) for document in documents]
 
 
 @router.get("/shops/{shop_id}", response_model=SessionShopContact)
-def get_session_shop_contact(
-    shop_id: str,
-    _: JunctionSession,
-    show_phone: ShowPhone,
-) -> SessionShopContact:
-    """One shop name with a per-shop toggle to view or hide its mobile number."""
+def get_session_shop_contact(shop_id: str, _: JunctionSession) -> SessionShopContact:
+    """One shop name, mobile number, and show_phone switch."""
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
-    return _serialize_session_shop_contact(document, show_phone=show_phone)
+    return _serialize_session_shop_contact(document)
