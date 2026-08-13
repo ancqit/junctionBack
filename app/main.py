@@ -25,6 +25,7 @@ from .orders import router as orders_router
 from .plans import router as plans_router
 from .plan_applications import router as plan_applications_router
 from .products import router as products_router
+from .product_bucket import router as product_bucket_router
 from .profile import notices_router, router as profile_router
 from .queries import router as queries_router
 from .rate_limit import limiter
@@ -61,6 +62,7 @@ app.include_router(digilocker_router)
 app.include_router(profile_router)
 app.include_router(notices_router)
 app.include_router(products_router)
+app.include_router(product_bucket_router)
 app.include_router(employees_router)
 app.include_router(orders_router)
 app.include_router(queries_router)
