@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .access_control import AuthenticatedUser, require_store_access
+from .access_control import AuthenticatedUser, require_store_access, resolve_store_id
 from .database import product_buckets, products
 from .plan_service import PlanType, build_shop_plan_summary, get_shop_document, require_active_shop_plan
 from .roles import UserRole, get_user_role
@@ -50,12 +50,25 @@ class ProductBucketResponse(BaseModel):
 
 
 class AddBucketPacksRequest(BaseModel):
-    store_id: str = Field(min_length=1, max_length=80)
+    store_id: str | None = Field(default=None, min_length=1, max_length=80)
+    shop_id: str | None = Field(default=None, min_length=1, max_length=80, description="Alias of store_id")
+    product_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        description="Resolve the shop from this product",
+    )
     packs: int = Field(
         ge=1,
         le=MAX_PACKS_PER_REQUEST,
         description=f"Number of packs to add. Each pack = {BUCKET_PACK_SIZE} products for INR {BUCKET_PACK_PRICE_INR}.",
     )
+
+    @model_validator(mode="after")
+    def require_shop_reference(self):
+        if not ((self.store_id or "").strip() or (self.shop_id or "").strip() or (self.product_id or "").strip()):
+            raise ValueError("store_id, shop_id, or product_id is required")
+        return self
 
 
 def utc_now() -> datetime:
@@ -142,10 +155,19 @@ def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
 @router.get("", response_model=ProductBucketResponse)
 def get_product_bucket(
     current_user: AuthenticatedUser,
-    store_id: Annotated[str, Query(min_length=1, max_length=80)],
+    store_id: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(min_length=1, max_length=80, description="Alias of store_id")] = None,
+    product_id: Annotated[
+        str | None,
+        Query(min_length=1, max_length=80, description="Resolve the shop from this product"),
+    ] = None,
 ) -> ProductBucketResponse:
-    """JWT-only. Product count for a shop vs that shop's plan capacity + purchased packs."""
-    return build_product_bucket(current_user, store_id)
+    """JWT-only. Product count for a shop vs that shop's plan capacity + purchased packs.
+
+    Identify the shop with store_id/shop_id, or pass product_id to look up that product's shop.
+    """
+    resolved = resolve_store_id(store_id=store_id, shop_id=shop_id, product_id=product_id)
+    return build_product_bucket(current_user, resolved)
 
 
 @router.post("/purchase", status_code=status.HTTP_201_CREATED)
@@ -159,7 +181,12 @@ def purchase_product_bucket_packs(
     """
     from .shop_payments import create_pack_purchase
 
-    return create_pack_purchase(current_user, payload.store_id, payload.packs)
+    resolved = resolve_store_id(
+        store_id=payload.store_id,
+        shop_id=payload.shop_id,
+        product_id=payload.product_id,
+    )
+    return create_pack_purchase(current_user, resolved, payload.packs)
 
 
 @router.post("/slots", status_code=status.HTTP_201_CREATED)
@@ -174,11 +201,14 @@ def add_product_bucket_packs(
     """
     from .shop_payments import create_pack_purchase
 
+    resolved = resolve_store_id(
+        store_id=payload.store_id,
+        shop_id=payload.shop_id,
+        product_id=payload.product_id,
+    )
     if get_user_role(current_user) == UserRole.admin:
-        # Admin bypass: apply packs immediately.
-        store_id = payload.store_id.strip()
-        require_store_access(current_user, store_id)
-        apply_bucket_packs(store_id, payload.packs)
-        return build_product_bucket(current_user, store_id)
+        require_store_access(current_user, resolved)
+        apply_bucket_packs(resolved, payload.packs)
+        return build_product_bucket(current_user, resolved)
 
-    return create_pack_purchase(current_user, payload.store_id, payload.packs)
+    return create_pack_purchase(current_user, resolved, payload.packs)

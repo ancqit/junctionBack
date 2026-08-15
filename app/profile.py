@@ -5,14 +5,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator, model_validator
 from pymongo import ReturnDocument
 
 from .database import database, notices, shops, users
-from .access_control import AuthenticatedUser, ensure_shop_access, require_store_access
+from .access_control import ensure_shop_access, resolve_store_id
 from .login import get_current_user
 from .product_images import validate_image_upload
-from .roles import UserRole, get_user_role
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/profile", tags=["profile"])
@@ -126,7 +125,8 @@ def get_profile_avatar_file(stored_image_id: str) -> StreamingResponse:
 
 
 class NoticeCreate(BaseModel):
-    store_id: str = Field(min_length=1, max_length=80)
+    store_id: str | None = Field(default=None, min_length=1, max_length=80)
+    shop_id: str | None = Field(default=None, min_length=1, max_length=80, description="Alias of store_id")
     message: str = Field(min_length=1, max_length=1000)
 
     @field_validator("message")
@@ -136,6 +136,12 @@ class NoticeCreate(BaseModel):
         if not value:
             raise ValueError("message must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def require_shop_reference(self):
+        if not ((self.store_id or "").strip() or (self.shop_id or "").strip()):
+            raise ValueError("store_id or shop_id is required")
+        return self
 
 
 class Notice(BaseModel):
@@ -151,10 +157,15 @@ class Notice(BaseModel):
 
 def serialize_notice(document: dict) -> Notice:
     raw_date = document["notice_date"]
-    notice_date = date.fromisoformat(raw_date) if isinstance(raw_date, str) else raw_date
+    if isinstance(raw_date, datetime):
+        notice_date = raw_date.date()
+    elif isinstance(raw_date, date):
+        notice_date = raw_date
+    else:
+        notice_date = date.fromisoformat(str(raw_date)[:10])
     return Notice(
         id=str(document["_id"]),
-        store_id=document["store_id"],
+        store_id=str(document["store_id"]),
         message=document["message"],
         notice_date=notice_date,
         created_at=document["created_at"],
@@ -166,12 +177,22 @@ def today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _find_today_notice(store_id: str) -> dict | None:
+    notice_date = today_utc().isoformat()
+    store_id = store_id.strip()
+    document = notices.find_one({"store_id": store_id, "notice_date": notice_date})
+    if document is None:
+        document = notices.find_one({"store_id": store_id, "notice_date": today_utc()})
+    return document
+
+
 @notices_router.post("", response_model=Notice)
 def post_today_notice(
     payload: NoticeCreate,
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> Notice:
-    shop = shops.find_one({"_id": parse_object_id(payload.store_id, "Shop")})
+    store_id = resolve_store_id(store_id=payload.store_id, shop_id=payload.shop_id)
+    shop = shops.find_one({"_id": parse_object_id(store_id, "Shop")})
     if shop is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     ensure_shop_access(current_user, shop)
@@ -179,7 +200,7 @@ def post_today_notice(
     notice_date = today_utc()
     now = datetime.now(timezone.utc)
     document = {
-        "store_id": payload.store_id,
+        "store_id": store_id,
         "message": payload.message,
         "notice_date": notice_date.isoformat(),
         "owner_user_id": str(current_user["_id"]),
@@ -188,14 +209,14 @@ def post_today_notice(
     }
 
     notices.create_index([("store_id", 1), ("notice_date", 1)], unique=True)
-    existing = notices.find_one({"store_id": payload.store_id, "notice_date": notice_date.isoformat()})
+    existing = _find_today_notice(store_id)
     if existing is None:
         result = notices.insert_one(document)
         document["_id"] = result.inserted_id
     else:
         updated = notices.find_one_and_update(
             {"_id": existing["_id"]},
-            {"$set": {"message": payload.message, "updated_at": now}},
+            {"$set": {"message": payload.message, "updated_at": now, "store_id": store_id, "notice_date": notice_date.isoformat()}},
             return_document=ReturnDocument.AFTER,
         )
         document = updated
@@ -203,28 +224,37 @@ def post_today_notice(
     return serialize_notice(document)
 
 
-@notices_router.get("/today", response_model=Notice)
+@notices_router.get("/today", response_model=Notice, openapi_extra={"security": []})
 def get_today_notice(
-    current_user: Annotated[dict, Depends(get_current_user)],
-    store_id: Annotated[str, Query(min_length=1, max_length=80)],
+    store_id: Annotated[str | None, Query(max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
 ) -> Notice:
-    require_store_access(current_user, store_id)
-    notice_date = today_utc().isoformat()
-    document = notices.find_one({"store_id": store_id, "notice_date": notice_date})
+    """Today's notice for a shop. Public — no JWT required."""
+    resolved = (store_id or shop_id or "").strip()
+    if not resolved:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="store_id or shop_id is required",
+        )
+    resolved = resolve_store_id(store_id=resolved, shop_id=None)
+    document = _find_today_notice(resolved)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No notice posted for today")
     return serialize_notice(document)
 
 
-@notices_router.get("", response_model=list[Notice])
-def list_today_notices(current_user: Annotated[dict, Depends(get_current_user)]) -> list[Notice]:
+@notices_router.get("", response_model=list[Notice], openapi_extra={"security": []})
+def list_today_notices(
+    store_id: Annotated[str | None, Query(max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
+) -> list[Notice]:
+    """Today's notices. Public. Optional store_id/shop_id filters to one shop."""
     notice_date = today_utc().isoformat()
-    role = get_user_role(current_user)
-    if role == UserRole.admin:
-        documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
-    else:
-        shop_ids = [str(shop["_id"]) for shop in shops.find({"owner_user_id": str(current_user["_id"])})]
-        if not shop_ids:
-            return []
-        documents = notices.find({"store_id": {"$in": shop_ids}, "notice_date": notice_date}).sort("updated_at", -1)
+    requested = (store_id or shop_id or "").strip()
+    if requested:
+        resolved = resolve_store_id(store_id=store_id, shop_id=shop_id)
+        document = _find_today_notice(resolved)
+        return [serialize_notice(document)] if document else []
+
+    documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
     return [serialize_notice(document) for document in documents]

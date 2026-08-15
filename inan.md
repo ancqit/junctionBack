@@ -58,7 +58,7 @@ Guest security when there is no user login. Intended for the **junction.today** 
 1. `POST /session` → store `access_token`
 2. Call APIs with `Authorization: Bearer <access_token>`:
    - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
-   - Shop names + phone toggle: `/session/shops`, `/session/shops/{id}` (see below)
+   - Shop names + phone switch: `/session/shops`, `/session/shops/{id}` (see below)
    - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
 3. When the token expires (~100s), call `POST /session` again for a new one
@@ -67,26 +67,24 @@ Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
 
 Session JWTs are **not** user login tokens — they unlock guest/catalog routes only. Creating or editing shops/products still requires a normal owner login JWT.
 
-### Shop name + phone toggle (`GET /session/shops`)
+### Shop name + phone switch (`GET /session/shops`)
 
-Requires a **session JWT** (not an owner login token). Each item is a shop **name** with a view/hide toggle for that shop’s mobile number.
+Requires a **session JWT**. Each shop includes `phone_number` and a boolean `show_phone` switch (same idea as `is_open`). The switch **does not** null the number — the front end shows or hides it.
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/session/shops` | Session | List shops as `{ id, name, phone_number, show_phone }`. Default hides numbers (`phone_number` is `null`, `show_phone` is `false`). Pass `show_phone=true` to reveal every number. Optional `city` + `locality` (both together) to filter. |
-| `GET` | `/session/shops/{shop_id}` | Session | One shop. Default hides the number; `show_phone=true` reveals that shop’s mobile. |
+| `GET` | `/session/shops` | Session | List `{ id, name, phone_number, show_phone }`. Optional `shop_id` / `store_id`. Optional `city` + `locality` together. |
+| `GET` | `/session/shops/{shop_id}` | Session | One shop with `phone_number` and `show_phone`. |
 
-**Hidden (toggle off):**
 ```json
-{ "id": "...", "name": "Ram Kirana", "phone_number": null, "show_phone": false }
+{ "id": "...", "name": "Ram Kirana", "phone_number": "+919876543210", "show_phone": false }
 ```
 
-**Visible (toggle on, `?show_phone=true`):**
-```json
-{ "id": "...", "name": "Ram Kirana", "phone_number": "+919876543210", "show_phone": true }
-```
+Owner toggles the switch (persisted on the shop, like `is_open`):
+- `PUT /shops/phone-status` `{ "name": "Ram Kirana", "show_phone": true }`
+- or `PUT /shops/{shop_id}` `{ "show_phone": true }`
 
-Front-end: bind a switch per shop. Off → `GET /session/shops/{id}`. On → `GET /session/shops/{id}?show_phone=true`. Catalog `GET /shops*` with a session token also hides `phone_number` unless `show_phone=true`. Owner JWTs still always receive the number.
+Front-end: bind a switch to `show_phone`. Off → hide the number in the UI. On → show `phone_number`. Catalog `GET /shops` also returns both fields.
 
 ---
 
@@ -139,9 +137,9 @@ Daily notice board for shop offers and announcements. One notice per shop per UT
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `POST` | `/notices` | Bearer | Post or update today's notice. Body: `{ "store_id": "<shop_id>", "message": "20% off today!" }`. |
-| `GET` | `/notices/today?store_id=<shop_id>` | Public | Get today's notice for a shop. |
-| `GET` | `/notices` | Bearer | List today's notices for the logged-in owner's shops (admins see all). |
+| `POST` | `/notices` | Bearer | Post or update today's notice. Body: `{ "store_id": "<shop_id>", "message": "20% off today!" }` (`shop_id` alias works). |
+| `GET` | `/notices/today?store_id=<shop_id>` | Public | Get today's notice for a shop. Also at `/api/notices/today`. `shop_id` query alias works. **No JWT.** Empty `store_id` returns 400. |
+| `GET` | `/notices` | Public | List today's notices. Optional `store_id` / `shop_id`. Also at `/api/notices`. |
 
 ---
 
@@ -176,8 +174,8 @@ New shops start on **Free Trial** (no payment). Paid plans activate only after p
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog; `phone_number` is hidden unless `show_phone=true`. |
-| `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop; `phone_number` is hidden unless `show_phone=true`. |
+| `GET` | `/shops` | Bearer (user **or** session) | List shops. Owner JWT: own shops (admin: all). `junction.today` session: full public catalog. Includes `show_phone` (boolean) and `phone_number`. Optional `shop_id` / `store_id`. |
+| `GET` | `/shops/{shop_id}` | Bearer (user **or** session) | Get one shop by ID. Session may read any shop. |
 | `GET` | `/shops/{shop_id}/products` | Bearer (user **or** session) | List products for that shop. `junction.today` flow: pick a shop from `/shops/by-location`, then call this. |
 | `GET` | `/shops/{shop_id}/plan` | Bearer (user) | Get this shop's plan (limits/billing are per shop). |
 | `POST` | `/shops/{shop_id}/plan/purchase` | Bearer (user) | Start a paid plan purchase. Body: `{ "plan_type": "starter" }`. Returns **pending** payment; plan activates only after `POST /payments/{id}/complete`. |
@@ -185,12 +183,13 @@ New shops start on **Free Trial** (no payment). Paid plans activate only after p
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
 | `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Starts on Free Trial (40 products / 15 days). Name must be unique **per mobile number**. Phone is taken from the logged-in user. |
-| `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, and/or `is_open`. |
+| `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, `is_open`, and/or `show_phone`. |
 | `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
+| `PUT` | `/shops/phone-status` | Bearer (user) | Toggle mobile visibility. Body: `{ "name": "Shop Name", "show_phone": true }` or `false`. Same pattern as `open-status`. |
 | `DELETE` | `/shops/{shop_id}` | Bearer (user) | Delete a shop. |
 | `GET` | `/shops/types` | Bearer (user **or** session) | List all shop/business types. |
 
-Shop responses include `open_time`, `closed_time`, and `is_open` so the front end can show hours and current open/closed state without recomputing.
+Shop responses include `open_time`, `closed_time`, `is_open`, `show_phone`, and `phone_number`. Bind UI switches to `is_open` and `show_phone`; do not null the number when the phone switch is off.
 
 ---
 
@@ -228,8 +227,8 @@ Extra product capacity for a shop after its plan allowance is used. Sold in pack
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/product-bucket?store_id=` | Bearer (user) | Capacity for a shop: plan limit, products count, purchased extra slots, remaining. |
-| `POST` | `/product-bucket/purchase` | Bearer (user) | Start pack purchase. Body: `{ "store_id": "<shop_id>", "packs": 1 }`. Returns pending payment. |
+| `GET` | `/product-bucket` | Bearer (user) | Capacity for a shop. Query: `store_id` / `shop_id`, and/or `product_id` (looks up that product's shop). |
+| `POST` | `/product-bucket/purchase` | Bearer (user) | Start pack purchase. Body: `{ "store_id": "<shop_id>", "packs": 1 }` or `{ "product_id": "<product_id>", "packs": 1 }`. Returns pending payment. |
 | `POST` | `/product-bucket/slots` | Bearer (user) | Alias of `/purchase` (pending payment). Admins apply packs immediately. |
 
 Then call `POST /payments/{payment_id}/complete` to add the slots. Total capacity = shop plan `max_products` + `extra_slots`.

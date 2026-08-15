@@ -57,24 +57,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(login_router)
-app.include_router(session_router)
-app.include_router(digilocker_router)
-app.include_router(profile_router)
-app.include_router(notices_router)
-app.include_router(products_router)
-app.include_router(product_bucket_router)
-app.include_router(employees_router)
-app.include_router(orders_router)
-app.include_router(queries_router)
-app.include_router(locations_router)
-app.include_router(plans_router)
-app.include_router(plan_applications_router)
-app.include_router(waitlist_router)
-app.include_router(terms_router)
-app.include_router(admin_router)
-app.include_router(shops_router)
-app.include_router(shop_payments_router)
+_routers = (
+    login_router,
+    session_router,
+    digilocker_router,
+    profile_router,
+    notices_router,
+    products_router,
+    product_bucket_router,
+    employees_router,
+    orders_router,
+    queries_router,
+    locations_router,
+    plans_router,
+    plan_applications_router,
+    waitlist_router,
+    terms_router,
+    admin_router,
+    shops_router,
+    shop_payments_router,
+)
+for _router in _routers:
+    app.include_router(_router)
+    app.include_router(_router, prefix="/api")
 
 
 @app.get("/health")
