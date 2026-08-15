@@ -11,7 +11,7 @@ import httpx
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -86,7 +86,9 @@ AVAILABLE_ROLES = [
 class OtpRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     phone_number: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
-    recaptcha_token: str = Field(min_length=1)
+    recaptcha_token: str | None = None
+    play_integrity_token: str | None = None
+    client_type: str | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -95,6 +97,12 @@ class OtpRequest(BaseModel):
         if not value:
             raise ValueError("display_name must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def verification_token_present(self) -> "OtpRequest":
+        if not self.recaptcha_token and not self.play_integrity_token:
+            raise ValueError("recaptcha_token or play_integrity_token is required")
+        return self
 
 
 class OtpRequestResponse(BaseModel):
@@ -186,7 +194,21 @@ def gcp_error(response: httpx.Response) -> HTTPException:
         message = response.json().get("error", {}).get("message", "OTP provider request failed")
     except ValueError:
         message = "OTP provider request failed"
+    if "TOO_MANY_ATTEMPTS" in message.upper():
+        message = "Too many OTP attempts. Wait a few minutes and try again."
     return HTTPException(status_code=400, detail=message)
+
+
+def gcp_send_otp_payload(payload: OtpRequest) -> dict:
+    body: dict = {"phoneNumber": payload.phone_number}
+    if payload.play_integrity_token:
+        body["playIntegrityToken"] = payload.play_integrity_token
+        body["clientType"] = "CLIENT_TYPE_ANDROID"
+    elif payload.recaptcha_token:
+        body["recaptchaToken"] = payload.recaptcha_token
+    else:
+        raise HTTPException(status_code=400, detail="recaptcha_token or play_integrity_token is required")
+    return body
 
 
 def token_response(user: dict) -> TokenResponse:
@@ -303,7 +325,7 @@ def request_otp(request: Request, payload: OtpRequest) -> OtpRequestResponse:
         response = httpx.post(
             GCP_SEND_OTP_URL,
             params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
-            json={"phoneNumber": payload.phone_number, "recaptchaToken": payload.recaptcha_token},
+            json=gcp_send_otp_payload(payload),
             timeout=15.0,
         )
     except httpx.HTTPError as exc:
