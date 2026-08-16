@@ -291,6 +291,7 @@ def gcp_send_otp_payload(payload: OtpRequest) -> dict:
         detail="recaptcha_token or play_integrity_token is required",
     )
 
+
 class RecaptchaParamsResponse(BaseModel):
     recaptcha_site_key: str
 
