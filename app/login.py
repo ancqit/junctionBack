@@ -203,17 +203,31 @@ def gcp_error(response: httpx.Response, *, client_type: str | None = None) -> HT
             "Play Integrity nonce is invalid. "
             "Android must send SHA-256(E.164 phone) as Base64 URL-safe no-wrap (no padding)."
         )
+    elif "INVALID_ARGUMENT" in upper and "RECAPTCHA_VERSION" in upper:
+        message = (
+            "OTP misconfigured: do not send recaptchaVersion RECAPTCHA_VERSION_2 to GCP "
+            "(only RECAPTCHA_ENTERPRISE is valid). Redeploy the latest junctionBack OTP fix."
+        )
     elif "CAPTCHA" in upper or "RECAPTCHA" in upper:
         if hint in {"android", "client_type_android"}:
             message = (
                 "Android bot check failed. Send play_integrity_token "
-                "(not a web reCAPTCHA token) with client_type=android."
+                "(not a web reCAPTCHA token) with client_type=android. "
+                "Debug APKs not from Play Store may need reCAPTCHA fallback (client_type=web)."
             )
         else:
             message = (
                 "Web bot check failed. Refresh and complete reCAPTCHA, then retry. "
                 "Web must send recaptcha_token with client_type=web (not an integrity token)."
             )
+    elif "INTERNAL_ERROR" in upper:
+        if hint in {"android", "client_type_android"}:
+            message = (
+                "Play Integrity failed (common on debug APKs not installed from Play Store). "
+                "Add the app SHA-256 in Firebase, or use an APK build that falls back to reCAPTCHA."
+            )
+        else:
+            message = "Identity Platform internal error. Wait a moment and try again."
     elif "INVALID_PHONE" in upper or "PHONE_NUMBER" in upper:
         message = "Invalid phone number. Use E.164 format, e.g. +9198XXXXXXXX."
     elif "QUOTA" in upper or "BILLING" in upper:
@@ -224,7 +238,7 @@ def gcp_error(response: httpx.Response, *, client_type: str | None = None) -> HT
 def gcp_send_otp_payload(payload: OtpRequest) -> dict:
     """
     Strict dual flows (do not mix tokens):
-    - Web: recaptcha_token + CLIENT_TYPE_WEB (+ RECAPTCHA_VERSION_2)
+    - Web: recaptcha_token + CLIENT_TYPE_WEB (never recaptchaVersion RECAPTCHA_VERSION_2 — invalid on GCP)
     - Android APK: play_integrity_token + CLIENT_TYPE_ANDROID
       (nonce inside token = Base64 URL-safe no-wrap SHA-256 of E.164 phone)
     """
@@ -252,7 +266,6 @@ def gcp_send_otp_payload(payload: OtpRequest) -> dict:
             )
         body["recaptchaToken"] = recaptcha
         body["clientType"] = "CLIENT_TYPE_WEB"
-        body["recaptchaVersion"] = "RECAPTCHA_VERSION_2"
         return body
 
     # Legacy clients without client_type: prefer explicit token present.
@@ -263,7 +276,6 @@ def gcp_send_otp_payload(payload: OtpRequest) -> dict:
     if recaptcha and not play_integrity:
         body["recaptchaToken"] = recaptcha
         body["clientType"] = "CLIENT_TYPE_WEB"
-        body["recaptchaVersion"] = "RECAPTCHA_VERSION_2"
         return body
     if play_integrity and recaptcha:
         raise HTTPException(
