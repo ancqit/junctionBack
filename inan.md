@@ -95,7 +95,7 @@ Front-end: bind a switch to `show_phone`. Off → hide the number in the UI. On 
 | `POST` | `/auth/register` | Public | Register with email + password. Returns JWT, user, plan, and role. |
 | `POST` | `/auth/login` | Public | Login with email + password (OAuth2 form: `username`, `password`). Returns JWT. |
 | `GET` | `/auth/recaptcha-params` | Public | Identity Platform reCAPTCHA site key for web invisible reCAPTCHA. |
-| `POST` | `/auth/otp/request` | Public | Send OTP via GCP Identity Platform. **Web:** `{ display_name, phone_number, recaptcha_token, client_type: "web" }`. **Android APK:** `{ display_name, phone_number, play_integrity_token, client_type: "android" }` (Play Integrity nonce = SHA-256 of E.164 phone). |
+| `POST` | `/auth/otp/request` | Public | Send OTP via GCP Identity Platform. **Web (classic default):** `{ display_name, phone_number, recaptcha_token, client_type: "web" }` → backend sends only `recaptchaToken` (no `clientType` / `recaptchaVersion`). Set `GCP_RECAPTCHA_MODE=enterprise` if Enterprise is enabled. **Android APK:** `{ display_name, phone_number, play_integrity_token, client_type: "android" }` (Play Integrity nonce = SHA-256 of E.164 phone, Base64 URL-safe no-wrap). |
 | `POST` | `/auth/otp/verify` | Public | Verify OTP and log in (or create account). Body: `phone_number`, `otp`, `session_info`. Phone is the account key. |
 | `POST` | `/auth/refresh` | Bearer | Issue a fresh token for the current user. |
 | `GET` | `/auth/roles` | Public | List available roles (`admin`, `owner`, `viewer`) with labels and descriptions. |

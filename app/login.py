@@ -29,6 +29,9 @@ JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 PBKDF2_ITERATIONS = 600_000
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", "5"))
 GCP_IDENTITY_PLATFORM_API_KEY = os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "")
+# classic (default): web sends only recaptchaToken — do NOT send clientType/recaptchaVersion
+# enterprise: web sends captchaResponse + CLIENT_TYPE_WEB + RECAPTCHA_ENTERPRISE
+GCP_RECAPTCHA_MODE = (os.getenv("GCP_RECAPTCHA_MODE", "classic") or "classic").strip().lower()
 GCP_SEND_OTP_URL = "https://identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode"
 GCP_VERIFY_OTP_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber"
 
@@ -191,56 +194,75 @@ def require_gcp_otp_configuration() -> None:
 
 def gcp_error(response: httpx.Response, *, client_type: str | None = None) -> HTTPException:
     try:
-        message = response.json().get("error", {}).get("message", "OTP provider request failed")
+        raw = response.json().get("error", {}).get("message", "OTP provider request failed")
     except ValueError:
-        message = "OTP provider request failed"
-    upper = message.upper()
+        raw = "OTP provider request failed"
+    upper = str(raw).upper()
     hint = (client_type or "").strip().lower()
+    is_android = hint in {"android", "client_type_android"}
+
     if "TOO_MANY_ATTEMPTS" in upper:
-        message = "Too many OTP attempts. Wait a few minutes and try again."
-    elif "NONCE" in upper or "BASE64" in upper:
-        message = (
+        detail = "Too many OTP attempts. Wait a few minutes and try again."
+    elif is_android and ("NONCE" in upper or "BASE64" in upper):
+        detail = (
             "Play Integrity nonce is invalid. "
             "Android must send SHA-256(E.164 phone) as Base64 URL-safe no-wrap (no padding)."
         )
     elif "INVALID_ARGUMENT" in upper and "RECAPTCHA_VERSION" in upper:
-        message = (
-            "OTP misconfigured: do not send recaptchaVersion RECAPTCHA_VERSION_2 to GCP "
-            "(only RECAPTCHA_ENTERPRISE is valid). Redeploy the latest junctionBack OTP fix."
+        detail = (
+            "OTP misconfigured: do not send recaptchaVersion RECAPTCHA_VERSION_2. "
+            "Use classic web payload (recaptchaToken only) or GCP_RECAPTCHA_MODE=enterprise."
         )
-    elif "CAPTCHA" in upper or "RECAPTCHA" in upper:
-        if hint in {"android", "client_type_android"}:
-            message = (
-                "Android bot check failed. Send play_integrity_token "
-                "(not a web reCAPTCHA token) with client_type=android. "
-                "Debug APKs not from Play Store may need reCAPTCHA fallback (client_type=web)."
+    elif "CAPTCHA" in upper or "RECAPTCHA" in upper or "SITE_MISMATCH" in upper:
+        if is_android:
+            detail = (
+                "Android bot check failed. Send play_integrity_token with client_type=android "
+                f"(GCP: {raw})."
             )
         else:
-            message = (
-                "Web bot check failed. Refresh and complete reCAPTCHA, then retry. "
-                "Web must send recaptcha_token with client_type=web (not an integrity token)."
+            # Keep the GCP reason — SITE_MISMATCH means domain not allowlisted / wrong site key.
+            detail = (
+                f"Web reCAPTCHA failed ({raw}). "
+                "Use the site key from GET /auth/recaptcha-params, and add this hostname to "
+                "Firebase Authentication → Settings → Authorized domains "
+                "(e.g. junction-frontweb.vercel.app, junction.website)."
             )
-    elif "INTERNAL_ERROR" in upper:
-        if hint in {"android", "client_type_android"}:
-            message = (
-                "Play Integrity failed (common on debug APKs not installed from Play Store). "
-                "Add the app SHA-256 in Firebase, or use an APK build that falls back to reCAPTCHA."
+    elif "INTERNAL_ERROR" in upper or "INTERNAL ERROR" in upper:
+        if is_android:
+            detail = (
+                "Play Integrity failed (common on sideloaded/debug APKs not from Play Store). "
+                "The app should fall back to reCAPTCHA automatically — install the latest APK if not. "
+                f"(GCP: {raw})"
             )
         else:
-            message = "Identity Platform internal error. Wait a moment and try again."
+            detail = f"Identity Platform internal error ({raw}). Wait a moment and try again."
     elif "INVALID_PHONE" in upper or "PHONE_NUMBER" in upper:
-        message = "Invalid phone number. Use E.164 format, e.g. +9198XXXXXXXX."
+        detail = "Invalid phone number. Use E.164 format, e.g. +9198XXXXXXXX."
     elif "QUOTA" in upper or "BILLING" in upper:
-        message = "SMS quota or billing issue on Identity Platform. Check the GCP/Firebase console."
-    return HTTPException(status_code=400, detail=message)
+        detail = "SMS quota or billing issue on Identity Platform. Check the GCP/Firebase console."
+    else:
+        detail = str(raw)
+    return HTTPException(status_code=400, detail=detail)
+
+
+def _web_recaptcha_body(recaptcha: str) -> dict:
+    """Classic Identity Platform web phone auth must not send clientType/recaptchaVersion."""
+    if GCP_RECAPTCHA_MODE in {"enterprise", "recaptcha_enterprise"}:
+        return {
+            "captchaResponse": recaptcha,
+            "clientType": "CLIENT_TYPE_WEB",
+            "recaptchaVersion": "RECAPTCHA_ENTERPRISE",
+        }
+    return {"recaptchaToken": recaptcha}
 
 
 def gcp_send_otp_payload(payload: OtpRequest) -> dict:
     """
     Strict dual flows (do not mix tokens):
-    - Web: recaptcha_token + CLIENT_TYPE_WEB (never recaptchaVersion RECAPTCHA_VERSION_2 — invalid on GCP)
-    - Android APK: play_integrity_token + CLIENT_TYPE_ANDROID
-      (nonce inside token = Base64 URL-safe no-wrap SHA-256 of E.164 phone)
+    - Web classic (default): { phoneNumber, recaptchaToken } only
+    - Web enterprise (GCP_RECAPTCHA_MODE=enterprise): captchaResponse + CLIENT_TYPE_WEB + RECAPTCHA_ENTERPRISE
+    - Android APK: playIntegrityToken + CLIENT_TYPE_ANDROID
+      (nonce = Base64 URL-safe no-wrap SHA-256 of E.164 phone)
     """
     phone = payload.phone_number.strip()
     body: dict = {"phoneNumber": phone}
@@ -264,8 +286,7 @@ def gcp_send_otp_payload(payload: OtpRequest) -> dict:
                 status_code=400,
                 detail="Web clients must send recaptcha_token (not play_integrity_token).",
             )
-        body["recaptchaToken"] = recaptcha
-        body["clientType"] = "CLIENT_TYPE_WEB"
+        body.update(_web_recaptcha_body(recaptcha))
         return body
 
     # Legacy clients without client_type: prefer explicit token present.
@@ -274,8 +295,7 @@ def gcp_send_otp_payload(payload: OtpRequest) -> dict:
         body["clientType"] = "CLIENT_TYPE_ANDROID"
         return body
     if recaptcha and not play_integrity:
-        body["recaptchaToken"] = recaptcha
-        body["clientType"] = "CLIENT_TYPE_WEB"
+        body.update(_web_recaptcha_body(recaptcha))
         return body
     if play_integrity and recaptcha:
         raise HTTPException(
