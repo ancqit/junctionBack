@@ -332,14 +332,23 @@ def build_plan_summary(user: dict) -> PlanSummary:
     user = expire_paid_plan_if_needed(user)
     user = expire_grace_period_if_needed(user)
     plan = user.get("plan") or default_plan_document()
-    plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
+    try:
+        plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
+    except ValueError:
+        plan_type = PlanType.free_trial
     selected_plan_type = plan.get("selected_plan_type")
     if selected_plan_type is not None:
-        selected_plan_type = PlanType(selected_plan_type)
+        try:
+            selected_plan_type = PlanType(selected_plan_type)
+        except ValueError:
+            selected_plan_type = None
     elif is_paid_plan(plan.get("type")):
         selected_plan_type = plan_type
     details = PLAN_CATALOG[plan_type.value]
-    status_value = PlanStatus(plan.get("status", PlanStatus.active.value))
+    try:
+        status_value = PlanStatus(plan.get("status", PlanStatus.active.value))
+    except ValueError:
+        status_value = PlanStatus.active
     started_at = plan.get("started_at", utc_now())
     ends_at = plan.get("ends_at")
     grace_ends_at = plan.get("grace_ends_at")

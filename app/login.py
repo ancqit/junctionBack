@@ -194,24 +194,59 @@ def gcp_error(response: httpx.Response) -> HTTPException:
         message = response.json().get("error", {}).get("message", "OTP provider request failed")
     except ValueError:
         message = "OTP provider request failed"
-    if "TOO_MANY_ATTEMPTS" in message.upper():
+    upper = message.upper()
+    if "TOO_MANY_ATTEMPTS" in upper:
         message = "Too many OTP attempts. Wait a few minutes and try again."
+    elif "CAPTCHA" in upper or "RECAPTCHA" in upper:
+        message = (
+            "Bot check failed. On web, refresh and retry reCAPTCHA. "
+            "On Android, use a Play Integrity token (not a web reCAPTCHA token)."
+        )
+    elif "INVALID_PHONE" in upper or "PHONE_NUMBER" in upper:
+        message = "Invalid phone number. Use E.164 format, e.g. +9198XXXXXXXX."
+    elif "QUOTA" in upper or "BILLING" in upper:
+        message = "SMS quota or billing issue on Identity Platform. Check the GCP/Firebase console."
     return HTTPException(status_code=400, detail=message)
 
 
 def gcp_send_otp_payload(payload: OtpRequest) -> dict:
+    """
+    Two client flows:
+    - Web: invisible reCAPTCHA token + CLIENT_TYPE_WEB
+    - Android APK: Play Integrity token + CLIENT_TYPE_ANDROID
+      (nonce must be SHA-256 of the E.164 phone number)
+    """
     body: dict = {"phoneNumber": payload.phone_number}
     if payload.play_integrity_token:
-        body["playIntegrityToken"] = payload.play_integrity_token
+        body["playIntegrityToken"] = payload.play_integrity_token.strip()
         body["clientType"] = "CLIENT_TYPE_ANDROID"
     elif payload.recaptcha_token:
-        body["recaptchaToken"] = payload.recaptcha_token
+        body["recaptchaToken"] = payload.recaptcha_token.strip()
+        # Required when reCAPTCHA Enterprise / SMS defense is enabled on the project.
+        body["clientType"] = "CLIENT_TYPE_WEB"
+        body["recaptchaVersion"] = "RECAPTCHA_VERSION_2"
     else:
-        raise HTTPException(status_code=400, detail="recaptcha_token or play_integrity_token is required")
+        raise HTTPException(
+            status_code=400,
+            detail="recaptcha_token or play_integrity_token is required",
+        )
+
+    # Optional hint from clients (web | android). Android wins if play integrity is present.
+    client_hint = (payload.client_type or "").strip().lower()
+    if client_hint in {"android", "client_type_android"} and payload.play_integrity_token:
+        body["clientType"] = "CLIENT_TYPE_ANDROID"
+    elif client_hint in {"web", "client_type_web"} and payload.recaptcha_token:
+        body["clientType"] = "CLIENT_TYPE_WEB"
     return body
 
 
-def token_response(user: dict) -> TokenResponse:
+class RecaptchaParamsResponse(BaseModel):
+    recaptcha_site_key: str
+
+
+def token_response(user: dict | None) -> TokenResponse:
+    if user is None:
+        raise HTTPException(status_code=500, detail="Could not load user after authentication")
     role = get_user_role(user)
     if role != UserRole.admin:
         if user.get("plan") is None:
@@ -222,10 +257,17 @@ def token_response(user: dict) -> TokenResponse:
         user = restore_persisted_plan(user)
     user = sync_role_from_keeper(user)
     role = get_user_role(user)
+    try:
+        plan = build_plan_summary(user)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not build plan for this account: {exc}",
+        ) from exc
     return TokenResponse(
         access_token=create_access_token(user["_id"]),
         user=user_summary(user),
-        plan=build_plan_summary(user),
+        plan=plan,
         role=role,
     )
 
@@ -260,6 +302,29 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
 @router.get("/roles", response_model=list[RoleInfo])
 def list_roles() -> list[RoleInfo]:
     return AVAILABLE_ROLES
+
+
+@router.get("/recaptcha-params", response_model=RecaptchaParamsResponse)
+def get_recaptcha_params() -> RecaptchaParamsResponse:
+    """
+    Public helper for the web login flow.
+    Returns the Identity Platform reCAPTCHA site key used by invisible reCAPTCHA.
+    """
+    require_gcp_otp_configuration()
+    try:
+        response = httpx.get(
+            "https://identitytoolkit.googleapis.com/v1/recaptchaParams",
+            params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Unable to reach GCP Identity Platform") from exc
+    if response.is_error:
+        raise gcp_error(response)
+    site_key = response.json().get("recaptchaSiteKey")
+    if not site_key:
+        raise HTTPException(status_code=502, detail="GCP did not return a reCAPTCHA site key")
+    return RecaptchaParamsResponse(recaptcha_site_key=site_key)
 
 
 @router.get("/me", response_model=AuthMeResponse)
@@ -395,6 +460,8 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
             user = users.find_one({"_id": result.inserted_id})
         except DuplicateKeyError:
             user = users.find_one({"phone_number": payload.phone_number})
+    if user is None:
+        raise HTTPException(status_code=500, detail="Could not create or load user after OTP verify")
     user = users.find_one_and_update(
         {"_id": user["_id"]},
         {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "updated_at": now}},
