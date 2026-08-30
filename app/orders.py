@@ -3,19 +3,26 @@ from enum import Enum
 import re
 import secrets
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pymongo import ReturnDocument
 
 from .access_control import (
     AuthenticatedUser,
     apply_store_filter,
+    get_product_or_404,
+    get_shop_by_store_id,
     require_order_access,
     require_store_access,
 )
 from .database import orders
+from .rate_limit import RATE_LIMIT_GUEST_ORDERS, limiter
+from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+JUNCTION_TODAY_SOURCE = "junction.today"
 
 
 class OrderStatus(str, Enum):
@@ -108,6 +115,11 @@ class OrderCreate(BaseModel):
     billing: BillingDetails
     status: OrderStatus = OrderStatus.pending
     notes: str | None = Field(default=None, max_length=2000)
+    source: str | None = Field(
+        default=None,
+        max_length=40,
+        description='Optional origin, e.g. "junction.today"',
+    )
 
     @field_validator("customer_name")
     @classmethod
@@ -117,12 +129,24 @@ class OrderCreate(BaseModel):
             raise ValueError("customer_name must not be blank")
         return value
 
+    @field_validator("source")
+    @classmethod
+    def strip_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
     @model_validator(mode="after")
     def validate_subtotal(self) -> "OrderCreate":
         items_subtotal = round(sum(item.line_total for item in self.items), 2)
         if abs(items_subtotal - self.billing.subtotal) > 0.01:
             raise ValueError("billing.subtotal must match the sum of order line items")
         return self
+
+
+class OrderStatusUpdate(BaseModel):
+    status: OrderStatus
 
 
 class Order(OrderCreate):
@@ -162,6 +186,7 @@ def serialize_order(document: dict) -> Order:
         billing=document["billing"],
         status=document.get("status", OrderStatus.pending.value),
         notes=document.get("notes"),
+        source=document.get("source"),
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
@@ -181,6 +206,20 @@ def build_list_query(
     if status:
         query["status"] = status.value
     return query
+
+
+def validate_order_products_for_store(store_id: str, items: list[OrderLineItem]) -> None:
+    """When product_id is set, require the product to exist and belong to store_id."""
+    for item in items:
+        product_id = (item.product_id or "").strip()
+        if not product_id:
+            continue
+        product = get_product_or_404(product_id)
+        if str(product.get("store_id", "")).strip() != store_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product {product_id} does not belong to this store",
+            )
 
 
 @router.get("", response_model=list[Order])
@@ -221,14 +260,33 @@ def get_order(order_id: str, current_user: AuthenticatedUser) -> Order:
 
 
 @router.post("", response_model=Order, status_code=status.HTTP_201_CREATED)
-def create_order(payload: OrderCreate, current_user: AuthenticatedUser) -> Order:
-    require_store_access(current_user, payload.store_id)
+@limiter.limit(RATE_LIMIT_GUEST_ORDERS)
+def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) -> Order:
+    """
+    Create an order.
+    - Owner/admin JWT: must own the shop (or be admin).
+    - junction.today session JWT: any real shop; no ownership check. Rate-limited.
+    """
+    store_id = payload.store_id.strip()
+    if is_junction_session(auth):
+        get_shop_by_store_id(store_id)
+    else:
+        require_store_access(auth["user"], store_id)
+
+    validate_order_products_for_store(store_id, payload.items)
+
     orders.create_index("order_number", unique=True)
     orders.create_index([("store_id", 1), ("customer_name", 1)])
+    orders.create_index([("store_id", 1), ("created_at", -1)])
 
     now = datetime.now(timezone.utc)
+    data = payload.model_dump(mode="json")
+    data["store_id"] = store_id
+    if is_junction_session(auth) and not data.get("source"):
+        data["source"] = JUNCTION_TODAY_SOURCE
+
     document = {
-        **payload.model_dump(mode="json"),
+        **data,
         "order_number": generate_order_number(),
         "created_at": now,
         "updated_at": now,
@@ -237,6 +295,29 @@ def create_order(payload: OrderCreate, current_user: AuthenticatedUser) -> Order
     result = orders.insert_one(document)
     document["_id"] = result.inserted_id
     return serialize_order(document)
+
+
+@router.patch("/{order_id}", response_model=Order)
+def update_order_status(
+    order_id: str,
+    payload: OrderStatusUpdate,
+    current_user: AuthenticatedUser,
+) -> Order:
+    """Owner/admin: update order status (confirm / complete / cancel)."""
+    document = require_order_access(current_user, order_id)
+    updated = orders.find_one_and_update(
+        {"_id": document["_id"]},
+        {
+            "$set": {
+                "status": payload.status.value,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return serialize_order(updated)
 
 
 @router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
