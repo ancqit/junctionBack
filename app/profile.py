@@ -178,12 +178,11 @@ def today_utc() -> date:
 
 
 def _find_today_notice(store_id: str) -> dict | None:
+    # Always query with an ISO date string — Python date objects are not valid BSON
+    # and make pymongo raise (500) on find.
     notice_date = today_utc().isoformat()
     store_id = store_id.strip()
-    document = notices.find_one({"store_id": store_id, "notice_date": notice_date})
-    if document is None:
-        document = notices.find_one({"store_id": store_id, "notice_date": today_utc()})
-    return document
+    return notices.find_one({"store_id": store_id, "notice_date": notice_date})
 
 
 @notices_router.post("", response_model=Notice)
@@ -224,23 +223,20 @@ def post_today_notice(
     return serialize_notice(document)
 
 
-@notices_router.get("/today", response_model=Notice, openapi_extra={"security": []})
+@notices_router.get("/today", response_model=list[Notice], openapi_extra={"security": []})
 def get_today_notice(
     store_id: Annotated[str | None, Query(max_length=80)] = None,
     shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
-) -> Notice:
-    """Today's notice for a shop. Public — no JWT required."""
+) -> list[Notice]:
+    """
+    Today's notice for a shop as a 0-or-1 list. Public — no JWT required.
+    Missing/blank store_id or no notice for today → [].
+    """
     resolved = (store_id or shop_id or "").strip()
     if not resolved:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="store_id or shop_id is required",
-        )
-    resolved = resolve_store_id(store_id=resolved, shop_id=None)
+        return []
     document = _find_today_notice(resolved)
-    if document is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No notice posted for today")
-    return serialize_notice(document)
+    return [serialize_notice(document)] if document else []
 
 
 @notices_router.get("", response_model=list[Notice], openapi_extra={"security": []})
@@ -252,8 +248,7 @@ def list_today_notices(
     notice_date = today_utc().isoformat()
     requested = (store_id or shop_id or "").strip()
     if requested:
-        resolved = resolve_store_id(store_id=store_id, shop_id=shop_id)
-        document = _find_today_notice(resolved)
+        document = _find_today_notice(requested)
         return [serialize_notice(document)] if document else []
 
     documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
