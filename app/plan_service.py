@@ -58,10 +58,10 @@ PLAN_CATALOG: dict[str, dict] = {
     },
     PlanType.premium.value: {
         "name": "Premium",
-        "price_inr": 599,
+        "price_inr": 5999,
         "max_products": 150,
         "profile_only": False,
-        "description": "Shop profile with up to 150 products for 1 year (INR 599)",
+        "description": "Shop profile with up to 150 products for 1 year (INR 5999)",
         "duration_days": PLAN_YEAR_DAYS,
     },
 }

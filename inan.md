@@ -9,7 +9,7 @@ Authorization: Bearer <access_token>
 ```
 
 **Roles:** `admin`, `owner`, `viewer`  
-**Plans:** Free Trial (40/15d), Starter (10/₹999/yr), Growth (80/₹2999/yr), Premium (150/₹599/yr) — attached to each **shop**. Paid plans/packs activate **after payment completes**, then products can be added. Extra packs: 40 products / ₹999. Admins are exempt from plan limits.
+**Plans:** Free Trial (40/15d), Starter (10/₹999/yr), Growth (80/₹2999/yr), Premium (150/₹5999/yr) — attached to each **shop**. Paid plans/packs activate **after payment completes**, then products can be added. Extra packs: 40 products / ₹999. Admins are exempt from plan limits.
 
 **`store_id`** on products, employees, and orders = the **shop ID** from `/shops`.
 
@@ -162,7 +162,7 @@ Shops are the main entry point. Products and employees are linked via `store_id`
 | Free Trial | 40 | INR 0 | 15 days |
 | Starter | 10 | INR 999 | 1 year |
 | Growth | 80 | INR 2999 | 1 year |
-| Premium | 150 | INR 599 | 1 year |
+| Premium | 150 | INR 5999 | 1 year |
 
 **Extra product packs:** after a shop’s plan allowance is used, buy packs of **40 products for INR 999** via `POST /product-bucket/purchase` (then complete payment).
 
@@ -378,7 +378,7 @@ Existing seeded/known localities skip re-geocoding.
 | Free Trial | ₹0 | 40 | 15 days |
 | Starter | ₹999 | 10 | 1 year |
 | Growth | ₹2999 | 80 | 1 year |
-| Premium | ₹599 | 150 | 1 year |
+| Premium | ₹5999 | 150 | 1 year |
 | Product pack (bucket) | ₹999 | +40 | add-on per shop |
 
 Prefer **`GET/POST /shops/{shop_id}/plan*`** for limits. Legacy **`/plans/me`** and **`POST /plans/select`** still operate on the user document for waitlist/onboarding.
