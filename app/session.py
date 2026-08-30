@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import jwt
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from .database import sessions, shops
+from .database import sessions, shops, users
 from .login import JWT_SECRET, oauth2_scheme
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 from .utils import parse_object_id
@@ -208,18 +209,32 @@ def create_session(request: Request) -> SessionResponse:
     )
 
 
-def _serialize_session_shop_contact(document: dict) -> SessionShopContact:
+def _serialize_session_shop_contact(document: dict, owner: dict | None = None) -> SessionShopContact:
     phone = document.get("phone_number")
     if isinstance(phone, str):
         phone = phone.strip() or None
     else:
         phone = None
+    if not phone and owner:
+        owner_phone = owner.get("phone_number")
+        if isinstance(owner_phone, str):
+            phone = owner_phone.strip() or None
     return SessionShopContact(
         id=str(document["_id"]),
         name=document["name"],
         phone_number=phone,
         show_phone=bool(document.get("show_phone", False)),
     )
+
+
+def _owner_by_id(owner_user_id: str | None) -> dict | None:
+    oid = (owner_user_id or "").strip()
+    if not oid:
+        return None
+    try:
+        return users.find_one({"_id": ObjectId(oid)})
+    except Exception:
+        return users.find_one({"_id": oid})
 
 
 def _session_shop_location_query(
@@ -262,11 +277,22 @@ def list_session_shop_contacts(
         document = shops.find_one({"_id": parse_object_id(requested, "Shop")})
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
-        return [_serialize_session_shop_contact(document)]
+        owner = _owner_by_id(str(document.get("owner_user_id", "")))
+        return [_serialize_session_shop_contact(document, owner)]
 
     query = _session_shop_location_query(city, locality)
-    documents = shops.find(query).sort("name", 1)
-    return [_serialize_session_shop_contact(document) for document in documents]
+    documents = list(shops.find(query).sort("name", 1))
+    owner_ids = {str(doc.get("owner_user_id", "")).strip() for doc in documents}
+    owner_ids.discard("")
+    owners: dict[str, dict] = {}
+    for oid in owner_ids:
+        owner = _owner_by_id(oid)
+        if owner is not None:
+            owners[oid] = owner
+    return [
+        _serialize_session_shop_contact(document, owners.get(str(document.get("owner_user_id", "")).strip()))
+        for document in documents
+    ]
 
 
 @router.get("/shops/{shop_id}", response_model=SessionShopContact)
@@ -275,4 +301,5 @@ def get_session_shop_contact(shop_id: str, _: JunctionSession) -> SessionShopCon
     document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
-    return _serialize_session_shop_contact(document)
+    owner = _owner_by_id(str(document.get("owner_user_id", "")))
+    return _serialize_session_shop_contact(document, owner)
