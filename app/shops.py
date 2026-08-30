@@ -23,6 +23,7 @@ from .plan_service import (
 from .products import Product, serialize_product
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
+from .shop_cleanup import delete_shop_cascade
 from .shop_payments import PlanPurchaseRequest, ShopPayment, create_plan_purchase
 from .shop_types import SHOP_TYPES, ShopTypeInfo
 from .utils import parse_object_id
@@ -208,6 +209,10 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         phone = phone.strip() or None
     else:
         phone = None
+    if not phone and owner:
+        owner_phone = owner.get("phone_number")
+        if isinstance(owner_phone, str):
+            phone = owner_phone.strip() or None
     shop_type_raw = document.get("shop_type")
     if owner and owner.get("shop_type"):
         shop_type_raw = owner.get("shop_type")
@@ -426,9 +431,16 @@ def update_shop_phone_status(
     """Toggle whether the shop mobile number is shown. Body: { "name": "...", "show_phone": true|false }."""
     existing = find_owned_shop_by_name(current_user, payload.name)
     ensure_shop_access(current_user, existing)
+    updates: dict = {"show_phone": payload.show_phone, "updated_at": datetime.now(timezone.utc)}
+    # Keep catalog phone in sync with the owner profile when the shop doc lacks one.
+    if not (isinstance(existing.get("phone_number"), str) and existing["phone_number"].strip()):
+        try:
+            updates["phone_number"] = get_user_phone_number(current_user)
+        except HTTPException:
+            pass
     document = shops.find_one_and_update(
         {"_id": existing["_id"]},
-        {"$set": {"show_phone": payload.show_phone, "updated_at": datetime.now(timezone.utc)}},
+        {"$set": updates},
         return_document=ReturnDocument.AFTER,
     )
     return serialize_shops([document])[0]
@@ -620,5 +632,5 @@ def delete_shop(shop_id: str, current_user: Annotated[dict, Depends(get_current_
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     ensure_shop_access(current_user, existing)
-    shops.delete_one({"_id": existing["_id"]})
+    delete_shop_cascade(shop_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
