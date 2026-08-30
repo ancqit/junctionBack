@@ -4,7 +4,7 @@ Plans live on the shop (see PLAN_CATALOG):
   - free_trial: 40 products / 15 days
   - starter: 10 products / INR 999 / 1 year
   - growth: 80 products / INR 2999 / 1 year
-  - premium: 150 products / INR 599 / 1 year
+  - premium: 150 products / INR 5999 / 1 year
 
 Extra capacity is sold in packs of 40 products for INR 999 each.
 """
