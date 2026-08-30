@@ -249,13 +249,17 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
     )
 
 
-def serialize_shops(documents: list[dict]) -> list[Shop]:
-    owner_ids = {str(document.get("owner_user_id", "")).strip() for document in documents}
+def serialize_shops(documents) -> list[Shop]:
+    # Materialize once: Mongo cursors are exhausted after a single iteration.
+    # Call sites often pass shops.find(...); without list(), owner lookup
+    # consumes the cursor and the serialize pass returns [].
+    docs = list(documents)
+    owner_ids = {str(document.get("owner_user_id", "")).strip() for document in docs}
     owner_ids.discard("")
     owners = _owner_catalog_lookup(owner_ids)
     return [
         serialize_shop(document, owners.get(str(document.get("owner_user_id", "")).strip()))
-        for document in documents
+        for document in docs
     ]
 
 
