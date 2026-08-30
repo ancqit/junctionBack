@@ -8,7 +8,9 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .access_control import ensure_shop_access
-from .database import products, shops
+from bson import ObjectId
+
+from .database import products, shops, users
 from .locations import ensure_city_and_locality
 from .login import get_current_user
 from .plan_service import (
@@ -162,12 +164,37 @@ class Shop(BaseModel):
     show_phone: bool = False
     phone_number: str | None = None
     owner_user_id: str
+    shop_type: str | None = None
+    shop_type_label: str | None = None
+    owner_bio: str | None = None
+    avatar_url: str | None = None
     plan: PlanSummary | None = None
     created_at: datetime
     updated_at: datetime
 
 
-def serialize_shop(document: dict) -> Shop:
+def _shop_type_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    trimmed = value.strip()
+    for entry in SHOP_TYPES:
+        if entry.value == trimmed:
+            return entry.label
+    return trimmed
+
+
+def _owner_catalog_lookup(owner_user_ids: set[str]) -> dict[str, dict]:
+    object_ids: list[ObjectId] = []
+    for owner_id in owner_user_ids:
+        if ObjectId.is_valid(owner_id):
+            object_ids.append(ObjectId(owner_id))
+    if not object_ids:
+        return {}
+    owners = users.find({"_id": {"$in": object_ids}})
+    return {str(owner["_id"]): owner for owner in owners}
+
+
+def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
     plan_summary = None
     if document.get("plan") is not None:
         plan_summary = build_shop_plan_summary(document)
@@ -181,6 +208,20 @@ def serialize_shop(document: dict) -> Shop:
         phone = phone.strip() or None
     else:
         phone = None
+    shop_type_raw = document.get("shop_type")
+    if owner and owner.get("shop_type"):
+        shop_type_raw = owner.get("shop_type")
+    shop_type = shop_type_raw.strip() if isinstance(shop_type_raw, str) and shop_type_raw.strip() else None
+    owner_bio = owner.get("bio") if owner else None
+    if isinstance(owner_bio, str):
+        owner_bio = owner_bio.strip() or None
+    else:
+        owner_bio = None
+    avatar_url = owner.get("avatar_url") if owner else None
+    if isinstance(avatar_url, str):
+        avatar_url = avatar_url.strip() or None
+    else:
+        avatar_url = None
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
@@ -193,10 +234,24 @@ def serialize_shop(document: dict) -> Shop:
         show_phone=bool(document.get("show_phone", False)),
         phone_number=phone,
         owner_user_id=document["owner_user_id"],
+        shop_type=shop_type,
+        shop_type_label=_shop_type_label(shop_type),
+        owner_bio=owner_bio,
+        avatar_url=avatar_url,
         plan=plan_summary,
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
+
+
+def serialize_shops(documents: list[dict]) -> list[Shop]:
+    owner_ids = {str(document.get("owner_user_id", "")).strip() for document in documents}
+    owner_ids.discard("")
+    owners = _owner_catalog_lookup(owner_ids)
+    return [
+        serialize_shop(document, owners.get(str(document.get("owner_user_id", "")).strip()))
+        for document in documents
+    ]
 
 
 def get_user_phone_number(user: dict) -> str:
@@ -279,17 +334,17 @@ def list_shops(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
         if not is_junction_session(auth):
             ensure_shop_access(auth["user"], document)
-        return [serialize_shop(document)]
+        return serialize_shops([document])
 
     if is_junction_session(auth):
         documents = shops.find({}).sort("created_at", -1)
-        return [serialize_shop(document) for document in documents]
+        return serialize_shops(list(documents))
 
     current_user = auth["user"]
     role = get_user_role(current_user)
     query = {} if role == UserRole.admin else {"owner_user_id": str(current_user["_id"])}
     documents = shops.find(query).sort("created_at", -1)
-    return [serialize_shop(document) for document in documents]
+    return serialize_shops(documents)
 
 
 @router.get("/by-name/{shop_name}", response_model=list[Shop])
@@ -312,7 +367,7 @@ def get_shops_by_name(
     documents = list(shops.find(query).sort("created_at", -1))
     if not documents:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No shops found with this name")
-    return [serialize_shop(document) for document in documents]
+    return serialize_shops(documents)
 
 
 @router.get("/by-location", response_model=list[Shop])
@@ -344,7 +399,7 @@ def list_shops_by_location(
             query["owner_user_id"] = str(current_user["_id"])
 
     documents = shops.find(query).sort("created_at", -1)
-    return [serialize_shop(document) for document in documents]
+    return serialize_shops(documents)
 
 
 @router.put("/open-status", response_model=Shop)
@@ -360,7 +415,7 @@ def update_shop_open_status(
         {"$set": {"is_open": payload.is_open, "updated_at": datetime.now(timezone.utc)}},
         return_document=ReturnDocument.AFTER,
     )
-    return serialize_shop(document)
+    return serialize_shops([document])[0]
 
 
 @router.put("/phone-status", response_model=Shop)
@@ -376,7 +431,7 @@ def update_shop_phone_status(
         {"$set": {"show_phone": payload.show_phone, "updated_at": datetime.now(timezone.utc)}},
         return_document=ReturnDocument.AFTER,
     )
-    return serialize_shop(document)
+    return serialize_shops([document])[0]
 
 
 @router.get("/{shop_id}", response_model=Shop)
@@ -386,7 +441,7 @@ def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
     if not is_junction_session(auth):
         ensure_shop_access(auth["user"], document)
-    return serialize_shop(document)
+    return serialize_shops([document])[0]
 
 
 @router.get("/{shop_id}/products", response_model=list[Product])
@@ -440,7 +495,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
             detail="This mobile number already has a shop with this name",
         ) from exc
     document["_id"] = result.inserted_id
-    return serialize_shop(document)
+    return serialize_shops([document])[0]
 
 
 @router.get("/{shop_id}/plan", response_model=PlanSummary)
@@ -556,7 +611,7 @@ def update_shop(
             status_code=status.HTTP_409_CONFLICT,
             detail="This mobile number already has a shop with this name",
         ) from exc
-    return serialize_shop(document)
+    return serialize_shops([document])[0]
 
 
 @router.delete("/{shop_id}", status_code=status.HTTP_204_NO_CONTENT)
