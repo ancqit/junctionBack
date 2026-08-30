@@ -16,11 +16,12 @@ Authorization: Bearer <access_token>
 ## Security
 
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
-- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`, catalog **shop reads**, and **product reads**. No user login required.
+- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`, catalog **shop/product reads**, and **`POST /orders`** (place an order at any real shop). No user login required.
 - **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — session/user JWT checks do.
-- **Shop-scoped writes** (and owner-app reads) require the user to own the shop (or be admin). `junction.today` session tokens are **read-only** for shops/products.
+- **Shop-scoped writes** (and owner-app reads) require the user to own the shop (or be admin). `junction.today` session tokens are **read-only** for shops/products, except they may **create** orders via `POST /orders`.
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
+- **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
 - **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
@@ -61,11 +62,12 @@ Guest security when there is no user login. Intended for the **junction.today** 
    - Shop names + phone switch: `/session/shops`, `/session/shops/{id}` (see below)
    - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
+   - Orders (create): `POST /orders` (any real shop; rate-limited; optional `source: "junction.today"`)
 3. When the token expires (~100s), call `POST /session` again for a new one
 
 Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
 
-Session JWTs are **not** user login tokens — they unlock guest/catalog routes only. Creating or editing shops/products still requires a normal owner login JWT.
+Session JWTs are **not** user login tokens — they unlock guest/catalog routes and order placement. Creating or editing shops/products still requires a normal owner login JWT.
 
 ### Shop name + phone switch (`GET /session/shops`)
 
@@ -264,16 +266,23 @@ Plan and product-pack purchases for a shop. Paid plans/packs unlock product capa
 
 ## Orders (`/orders`)
 
+Shared shop orders: **junction.today** guests place orders; **owner app** lists and updates status.
+
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/orders` | Public | List orders. Optional query: `store_id`, `customer_name`, `status`. |
-| `GET` | `/orders/by-name/{customer_name}` | Public | Get orders for a customer by name. Optional query: `store_id`. |
-| `GET` | `/orders/{order_id}` | Public | Get one order by ID (includes billing details and line items). |
-| `POST` | `/orders` | Public | Create order with billing. Body: `store_id`, `customer_name`, line items, `billing` (subtotal, tax, total, payment method, address). Auto-generates `order_number`. |
-| `DELETE` | `/orders/{order_id}` | Public | Delete an order. |
+| `GET` | `/orders` | Bearer (owner/admin) | List orders for shops you own. Optional query: `store_id`, `customer_name`, `status`. |
+| `GET` | `/orders/by-name/{customer_name}` | Bearer (owner/admin) | Get orders for a customer by name. Optional query: `store_id`. |
+| `GET` | `/orders/{order_id}` | Bearer (owner/admin) | Get one order by ID (includes billing details and line items). |
+| `POST` | `/orders` | Bearer (owner/admin **or** session) | Create order with billing. Body: `store_id`, `customer_name`, optional `customer_phone`, line items, `billing` (subtotal, tax, total, payment method, address), optional `source`. Auto-generates `order_number`. Session JWT: any real shop (validated); no ownership check; rate-limited. Owner JWT: must own the shop. When `product_id` is set on a line item, the product must belong to `store_id`. |
+| `PATCH` | `/orders/{order_id}` | Bearer (owner/admin) | Update status. Body: `{ "status": "confirmed" \| "completed" \| "cancelled" \| "pending" }`. |
+| `DELETE` | `/orders/{order_id}` | Bearer (owner/admin) | Delete an order. |
+
+**`source` (optional):** e.g. `"junction.today"`. Session creates default `source` to `junction.today` when omitted.
 
 **Order statuses:** `pending`, `confirmed`, `completed`, `cancelled`  
 **Payment statuses:** `pending`, `paid`, `failed`, `refunded`
+
+**junction.today checkout flow:** `POST /session` → browse shops/products → `POST /orders` with session JWT, `store_id`, customer name/phone, COD/`cash` billing, `source: "junction.today"`.
 
 ---
 
