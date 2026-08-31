@@ -99,6 +99,8 @@ Front-end: bind a switch to `show_phone`. Off → hide the number in the UI. On 
 | `GET` | `/auth/recaptcha-params` | Public | Identity Platform reCAPTCHA site key for web invisible reCAPTCHA. |
 | `POST` | `/auth/otp/request` | Public | Send OTP via GCP Identity Platform. **Web (classic default):** `{ display_name, phone_number, recaptcha_token, client_type: "web" }` → backend sends only `recaptchaToken` (no `clientType` / `recaptchaVersion`). Set `GCP_RECAPTCHA_MODE=enterprise` if Enterprise is enabled. **Android APK:** `{ display_name, phone_number, play_integrity_token, client_type: "android" }` (Play Integrity nonce = SHA-256 of E.164 phone, Base64 URL-safe no-wrap). |
 | `POST` | `/auth/otp/verify` | Public | Verify OTP and log in (or create account). Body: `phone_number`, `otp`, `session_info`. Phone is the account key. |
+| `POST` | `/auth/catalog-otp/request` | Public | junction.today checkout: same GCP SMS as owner OTP + web reCAPTCHA. Body: `{ phone_number, recaptcha_token, display_name?, client_type?: "web" }`. Does **not** create an owner account. |
+| `POST` | `/auth/catalog-otp/verify` | Public | Verify catalog SMS OTP. Body: `phone_number`, `otp`, `session_info`. Returns `{ verified, phone_number }` only. |
 | `POST` | `/auth/refresh` | Bearer | Issue a fresh token for the current user. |
 | `GET` | `/auth/roles` | Public | List available roles (`admin`, `owner`, `viewer`) with labels and descriptions. |
 | `GET` | `/auth/me` | Bearer | Get current user, role, and plan summary. |

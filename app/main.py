@@ -34,6 +34,7 @@ from .shops import router as shops_router
 from .shop_payments import router as shop_payments_router
 from .terms import router as terms_router
 from .waitlist import router as waitlist_router
+from .catalog_otp import router as catalog_otp_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -59,6 +60,7 @@ app.add_middleware(
 )
 _routers = (
     login_router,
+    catalog_otp_router,
     session_router,
     digilocker_router,
     profile_router,
