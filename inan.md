@@ -22,7 +22,7 @@ Authorization: Bearer <access_token>
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
-- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`.
+- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
 
@@ -124,6 +124,22 @@ There is no deactivated state. Users are either `admin`, `owner`, or `viewer`.
 |--------|----------|------|-----|
 | `GET` | `/auth/digilocker/connect` | Bearer | Start DigiLocker OAuth. Returns `authorization_url` to redirect the user. Requires verified phone. |
 | `GET` | `/auth/digilocker/callback` | Public | OAuth callback. Query: `state`, `code` (or `error`). Marks user as DigiLocker-verified. |
+
+---
+
+## Blog (`/blog`) — junctionBlog
+
+Public routes for [ancqit/junctionBlog](https://github.com/ancqit/junctionBlog). Also mounted under `/api/blog/*`.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `POST` | `/blog/entries` | Public | Create entry. Body: `junction`, `body`, `creatorName`, `creatorNumber`, `nameTag`, `tags[]`. Assigns `blogNumber` from counter (starts at 2001). |
+| `GET` | `/blog/entries` | Public | List entries (newest first, max 200). Query: `q` (number or text), `tag` (nameTag). |
+| `GET` | `/blog/entries/{blog_number}` | Public | Get one entry by number. |
+| `PATCH` | `/blog/entries/{blog_number}` | Public | Update entry `body`. |
+| `GET` | `/blog/profiles` | Public | List blog profiles (max 200). |
+| `GET` | `/blog/profiles/{user_number}` | Public | Get one profile. |
+| `PUT` | `/blog/profiles/{user_number}` | Public | Upsert profile (schedule / rest days / day templates). |
 
 ---
 
