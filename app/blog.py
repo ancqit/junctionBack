@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
@@ -55,9 +56,34 @@ class BlogEntryPatch(BaseModel):
         return value
 
 
+class BlogComment(BaseModel):
+    id: str
+    body: str
+    creatorName: str
+    creatorNumber: str
+    nameTag: str
+    createdAt: datetime
+
+
+class BlogCommentCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+    creatorName: str = Field(min_length=1, max_length=100)
+    creatorNumber: str = Field(min_length=1, max_length=16)
+    nameTag: str = Field(min_length=1, max_length=48)
+
+    @field_validator("body", "creatorName", "creatorNumber", "nameTag")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
 class BlogEntry(BlogEntryCreate):
     id: str
     blogNumber: int
+    comments: list[BlogComment] = Field(default_factory=list)
     createdAt: datetime
     updatedAt: datetime
 
@@ -100,6 +126,7 @@ def serialize_entry(document: dict) -> BlogEntry:
         creatorNumber=document["creatorNumber"],
         nameTag=document["nameTag"],
         tags=document.get("tags") or [],
+        comments=[BlogComment(**item) for item in document.get("comments") or []],
         createdAt=document["createdAt"],
         updatedAt=document["updatedAt"],
     )
@@ -110,6 +137,7 @@ def create_entry(payload: BlogEntryCreate) -> BlogEntry:
     now = datetime.now(timezone.utc)
     document = {
         **payload.model_dump(),
+        "comments": [],
         "blogNumber": next_number("blog", 2001),
         "createdAt": now,
         "updatedAt": now,
@@ -156,6 +184,28 @@ def update_entry(blog_number: int, payload: BlogEntryPatch) -> BlogEntry:
     document = blog_entries.find_one_and_update(
         {"blogNumber": blog_number},
         {"$set": {"body": payload.body, "updatedAt": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Blog entry not found")
+    return serialize_entry(document)
+
+
+@router.post(
+    "/entries/{blog_number}/comments",
+    response_model=BlogEntry,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_comment(blog_number: int, payload: BlogCommentCreate) -> BlogEntry:
+    now = datetime.now(timezone.utc)
+    comment = {
+        "id": str(uuid4()),
+        **payload.model_dump(),
+        "createdAt": now,
+    }
+    document = blog_entries.find_one_and_update(
+        {"blogNumber": blog_number},
+        {"$push": {"comments": comment}, "$set": {"updatedAt": now}},
         return_document=ReturnDocument.AFTER,
     )
     if document is None:
