@@ -29,6 +29,11 @@ class Profile(BaseModel):
     avatar_url: str | None
     digilocker_verified: bool = False
     digilocker_name: str | None = None
+    gstin: str | None = None
+    gst_verified: bool = False
+    gst_legal_name: str | None = None
+    gst_trade_name: str | None = None
+    gst_status: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -59,6 +64,11 @@ def serialize_profile(user: dict) -> Profile:
         avatar_url=user.get("avatar_url"),
         digilocker_verified=bool(user.get("digilocker_verified", False)),
         digilocker_name=user.get("digilocker_name"),
+        gstin=user.get("gstin"),
+        gst_verified=bool(user.get("gst_verified", False)),
+        gst_legal_name=user.get("gst_legal_name"),
+        gst_trade_name=user.get("gst_trade_name"),
+        gst_status=user.get("gst_status"),
         created_at=user["created_at"],
         updated_at=user["updated_at"],
     )

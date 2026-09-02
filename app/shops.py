@@ -169,6 +169,10 @@ class Shop(BaseModel):
     shop_type_label: str | None = None
     owner_bio: str | None = None
     avatar_url: str | None = None
+    /** Owner DigiLocker / gov-ID verification (from users collection). */
+    digilocker_verified: bool = False
+    /** Owner GSTIN verification via public GST portal (from users collection). */
+    gst_verified: bool = False
     plan: PlanSummary | None = None
     created_at: datetime
     updated_at: datetime
@@ -243,6 +247,8 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         shop_type_label=_shop_type_label(shop_type),
         owner_bio=owner_bio,
         avatar_url=avatar_url,
+        digilocker_verified=bool(owner.get("digilocker_verified")) if owner else False,
+        gst_verified=bool(owner.get("gst_verified")) if owner else False,
         plan=plan_summary,
         created_at=document["created_at"],
         updated_at=document["updated_at"],

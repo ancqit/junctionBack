@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import httpx
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from pymongo import ReturnDocument
 
@@ -19,6 +20,10 @@ router = APIRouter(prefix="/auth/digilocker", tags=["digilocker"])
 DIGILOCKER_CLIENT_ID = os.getenv("DIGILOCKER_CLIENT_ID", "")
 DIGILOCKER_CLIENT_SECRET = os.getenv("DIGILOCKER_CLIENT_SECRET", "")
 DIGILOCKER_REDIRECT_URI = os.getenv("DIGILOCKER_REDIRECT_URI", "")
+DIGILOCKER_SUCCESS_REDIRECT = os.getenv(
+    "DIGILOCKER_SUCCESS_REDIRECT",
+    "https://www.junction.website/back-office?digilocker=verified",
+)
 DIGILOCKER_AUTHORIZE_URL = os.getenv(
     "DIGILOCKER_AUTHORIZE_URL",
     "https://digilocker.meripehchaan.gov.in/public/oauth2/1/authorize",
@@ -83,12 +88,12 @@ def connect_digilocker(
     return DigiLockerConnectResponse(authorization_url=f"{DIGILOCKER_AUTHORIZE_URL}?{query}")
 
 
-@router.get("/callback", response_model=DigiLockerCallbackResponse)
+@router.get("/callback")
 def digilocker_callback(
     state: str = Query(min_length=20, max_length=200),
     code: str | None = None,
     error: str | None = None,
-) -> DigiLockerCallbackResponse:
+):
     require_configuration()
     if error or not code:
         raise HTTPException(status_code=400, detail=error or "DigiLocker authorization code is missing")
@@ -146,6 +151,10 @@ def digilocker_callback(
     )
     if user is None:
         raise HTTPException(status_code=404, detail="User no longer exists")
+
+    if DIGILOCKER_SUCCESS_REDIRECT.strip():
+        return RedirectResponse(url=DIGILOCKER_SUCCESS_REDIRECT.strip(), status_code=302)
+
     mobile_verified = user.get("mobile_verified", bool(user.get("phone_number")))
     return DigiLockerCallbackResponse(
         message="DigiLocker verified",
