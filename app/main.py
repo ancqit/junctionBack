@@ -36,6 +36,7 @@ from .terms import router as terms_router
 from .waitlist import router as waitlist_router
 from .catalog_otp import router as catalog_otp_router
 from .blog import router as blog_router
+from .blog_auth import router as blog_auth_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -80,6 +81,7 @@ _routers = (
     shops_router,
     shop_payments_router,
     blog_router,
+    blog_auth_router,
 )
 for _router in _routers:
     app.include_router(_router)

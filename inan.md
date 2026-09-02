@@ -141,6 +141,18 @@ Public routes for [ancqit/junctionBlog](https://github.com/ancqit/junctionBlog).
 | `GET` | `/blog/profiles/{user_number}` | Public | Get one profile. |
 | `PUT` | `/blog/profiles/{user_number}` | Public | Upsert profile (schedule / rest days / day templates). |
 
+### Blog lock (`/blog/auth`) — character-map PIN
+
+Phone + 4 characters from a fixed map (no email/password register). Returns a JWT with `scope: "blog"`.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/blog/auth/charset` | Public | Character map + `pin_length` (4). |
+| `POST` | `/blog/auth/setup` | Public | New user: `{ phone_number, pin, display_name? }` → JWT. 409 if PIN already set. |
+| `POST` | `/blog/auth/login` | Public | Old user unlock: `{ phone_number, pin }` → JWT. |
+| `POST` | `/blog/auth/update-pin` | Bearer (blog) | `{ current_pin, new_pin }` → new JWT. |
+| `GET` | `/blog/auth/me` | Bearer (blog) | Current blog account. |
+
 ---
 
 ## Profile (`/profile`)
