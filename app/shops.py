@@ -169,9 +169,9 @@ class Shop(BaseModel):
     shop_type_label: str | None = None
     owner_bio: str | None = None
     avatar_url: str | None = None
-    /** Owner DigiLocker / gov-ID verification (from users collection). */
+    # Owner DigiLocker / gov-ID verification (from users collection).
     digilocker_verified: bool = False
-    /** Owner GSTIN verification via public GST portal (from users collection). */
+    # Owner GSTIN verification via public GST portal (from users collection).
     gst_verified: bool = False
     plan: PlanSummary | None = None
     created_at: datetime
