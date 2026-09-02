@@ -2,9 +2,9 @@
 
 No traditional register: phone is the account key. New users set a 4-char PIN
 from a fixed charset; returning users unlock with the same map.
-"""
 
-from __future__ import annotations
+Avoid `from __future__ import annotations`: with slowapi it makes body models look like query params (422).
+"""
 
 import re
 from datetime import datetime, timedelta, timezone
