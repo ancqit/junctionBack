@@ -2,9 +2,9 @@
 
 Same Google SMS path as owner login (`/auth/otp/*`), but verify only confirms
 the phone — it does not create a Junction owner account or issue an owner JWT.
-"""
 
-from __future__ import annotations
+Avoid `from __future__ import annotations`: with slowapi it makes body models look like query params (422).
+"""
 
 import hashlib
 import re
