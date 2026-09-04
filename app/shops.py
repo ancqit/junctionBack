@@ -47,6 +47,22 @@ def _validate_hh_mm(value: str, field_name: str) -> str:
     return value
 
 
+def _normalize_shop_type(value: str | None) -> str | None:
+    """Map catalog value or label → canonical ShopTypeInfo.value."""
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    lowered = trimmed.lower()
+    for entry in SHOP_TYPES:
+        if entry.value == trimmed or entry.value.lower() == lowered:
+            return entry.value
+        if entry.label.lower() == lowered:
+            return entry.value
+    raise ValueError("shop_type must be a known shop type value or label")
+
+
 class ShopCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     city: str = Field(min_length=1, max_length=80)
@@ -56,6 +72,7 @@ class ShopCreate(BaseModel):
     closed_time: str = Field(min_length=4, max_length=5, description="Shop closed time HH:MM (24h)")
     is_open: bool = True
     show_phone: bool = False
+    shop_type: str | None = Field(default=None, max_length=80, description="Catalog shop type value")
 
     @field_validator("name")
     @classmethod
@@ -90,6 +107,11 @@ class ShopCreate(BaseModel):
     def validate_closed_time(cls, value: str) -> str:
         return _validate_hh_mm(value, "closed_time")
 
+    @field_validator("shop_type")
+    @classmethod
+    def validate_shop_type(cls, value: str | None) -> str | None:
+        return _normalize_shop_type(value)
+
 
 class ShopUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
@@ -100,6 +122,7 @@ class ShopUpdate(BaseModel):
     closed_time: str | None = Field(default=None, min_length=4, max_length=5)
     is_open: bool | None = None
     show_phone: bool | None = None
+    shop_type: str | None = Field(default=None, max_length=80)
 
     @field_validator("name", "city", "locality")
     @classmethod
@@ -125,6 +148,11 @@ class ShopUpdate(BaseModel):
         if value is None:
             return None
         return _validate_hh_mm(value, "time")
+
+    @field_validator("shop_type")
+    @classmethod
+    def validate_shop_type(cls, value: str | None) -> str | None:
+        return _normalize_shop_type(value)
 
 
 class ShopOpenStatusUpdate(BaseModel):
@@ -243,8 +271,9 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         owner_phone = owner.get("phone_number")
         if isinstance(owner_phone, str):
             phone = owner_phone.strip() or None
+    # Prefer per-shop type; fall back to owner profile for older records.
     shop_type_raw = document.get("shop_type")
-    if owner and owner.get("shop_type"):
+    if not (isinstance(shop_type_raw, str) and shop_type_raw.strip()) and owner and owner.get("shop_type"):
         shop_type_raw = owner.get("shop_type")
     shop_type = shop_type_raw.strip() if isinstance(shop_type_raw, str) and shop_type_raw.strip() else None
     owner_bio = owner.get("bio") if owner else None
@@ -577,6 +606,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "show_phone": payload.show_phone,
         "phone_number": phone_number,
         "owner_user_id": str(current_user["_id"]),
+        "shop_type": payload.shop_type,
         "plan": default_plan_document(),
         "created_at": now,
         "updated_at": now,

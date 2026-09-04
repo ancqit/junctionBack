@@ -163,9 +163,32 @@ class Notice(BaseModel):
     notice_date: date
     created_at: datetime
     updated_at: datetime
+    # Denormalized from the shop so the public board is junction-agnostic.
+    shop_name: str | None = None
+    city: str | None = None
+    locality: str | None = None
 
 
-def serialize_notice(document: dict) -> Notice:
+def _shop_meta_for_store_ids(store_ids: set[str]) -> dict[str, dict[str, str]]:
+    object_ids = []
+    for store_id in store_ids:
+        try:
+            object_ids.append(parse_object_id(store_id, "Shop"))
+        except HTTPException:
+            continue
+    if not object_ids:
+        return {}
+    meta: dict[str, dict[str, str]] = {}
+    for document in shops.find({"_id": {"$in": object_ids}}):
+        meta[str(document["_id"])] = {
+            "shop_name": str(document.get("name") or "").strip(),
+            "city": str(document.get("city") or "").strip(),
+            "locality": str(document.get("locality") or "").strip(),
+        }
+    return meta
+
+
+def serialize_notice(document: dict, shop_meta: dict[str, str] | None = None) -> Notice:
     raw_date = document["notice_date"]
     if isinstance(raw_date, datetime):
         notice_date = raw_date.date()
@@ -173,6 +196,7 @@ def serialize_notice(document: dict) -> Notice:
         notice_date = raw_date
     else:
         notice_date = date.fromisoformat(str(raw_date)[:10])
+    meta = shop_meta or {}
     return Notice(
         id=str(document["_id"]),
         store_id=str(document["store_id"]),
@@ -180,7 +204,20 @@ def serialize_notice(document: dict) -> Notice:
         notice_date=notice_date,
         created_at=document["created_at"],
         updated_at=document["updated_at"],
+        shop_name=meta.get("shop_name") or None,
+        city=meta.get("city") or None,
+        locality=meta.get("locality") or None,
     )
+
+
+def serialize_notices(documents: list[dict]) -> list[Notice]:
+    store_ids = {str(document.get("store_id", "")).strip() for document in documents}
+    store_ids.discard("")
+    meta_by_store = _shop_meta_for_store_ids(store_ids)
+    return [
+        serialize_notice(document, meta_by_store.get(str(document.get("store_id", "")).strip()))
+        for document in documents
+    ]
 
 
 def today_utc() -> date:
@@ -230,7 +267,7 @@ def post_today_notice(
         )
         document = updated
 
-    return serialize_notice(document)
+    return serialize_notices([document])[0]
 
 
 @notices_router.get("/today", response_model=list[Notice], openapi_extra={"security": []})
@@ -246,7 +283,7 @@ def get_today_notice(
     if not resolved:
         return []
     document = _find_today_notice(resolved)
-    return [serialize_notice(document)] if document else []
+    return serialize_notices([document]) if document else []
 
 
 @notices_router.delete("/today", status_code=status.HTTP_204_NO_CONTENT)
@@ -277,17 +314,18 @@ def list_today_notices(
     shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
 ) -> list[Notice]:
     """
-    Today's notices. Public. Optional store_id/shop_id filters to one shop.
+    Today's notices. Public and junction-agnostic. Optional store_id/shop_id filters to one shop.
 
     Full-day feed is sorted by updated_at ascending (FIFO queue: oldest first) so
     clients can take the last N entries as the recent notice-board window.
+    Each notice includes shop_name, city, and locality from the shop catalog.
     """
     notice_date = today_utc().isoformat()
     requested = (store_id or shop_id or "").strip()
     if requested:
         document = _find_today_notice(requested)
-        return [serialize_notice(document)] if document else []
+        return serialize_notices([document]) if document else []
 
-    # FIFO queue: oldest first
-    documents = notices.find({"notice_date": notice_date}).sort("updated_at", 1)
-    return [serialize_notice(document) for document in documents]
+    # FIFO queue: oldest first — junction-agnostic global feed
+    documents = list(notices.find({"notice_date": notice_date}).sort("updated_at", 1))
+    return serialize_notices(documents)
