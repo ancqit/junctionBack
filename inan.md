@@ -84,6 +84,7 @@ Requires a **session JWT**. Each shop includes `phone_number` and a boolean `sho
 
 Owner toggles the switch (persisted on the shop, like `is_open`):
 - `PUT /shops/phone-status` `{ "name": "Ram Kirana", "show_phone": true }`
+- `PUT /shops/lock-status` `{ "id": "<shop_id>", "is_locked": true, "lock_reason": "manual" }` (or `name` instead of `id`)
 - or `PUT /shops/{shop_id}` `{ "show_phone": true }`
 
 Front-end: bind a switch to `show_phone`. Off → hide the number in the UI. On → show `phone_number`. Catalog `GET /shops` also returns both fields.
@@ -219,6 +220,7 @@ New shops start on **Free Trial** (no payment). Paid plans activate only after p
 | `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, `is_open`, and/or `show_phone`. |
 | `PUT` | `/shops/open-status` | Bearer (user) | Set open/closed for display. Body: `{ "name": "Shop Name", "is_open": true }` or `false`. Finds the caller's shop by name (case-insensitive) and updates `is_open`. |
 | `PUT` | `/shops/phone-status` | Bearer (user) | Toggle mobile visibility. Body: `{ "name": "Shop Name", "show_phone": true }` or `false`. Same pattern as `open-status`. |
+| `PUT` | `/shops/lock-status` | Bearer (user) | Owner↔viewer lock. Prefer `{ "id": "...", "is_locked": true, "lock_reason": "manual" }`; `name` also accepted. Sets `is_locked` + `lock_reason` (`manual` \| `plan_expired`). |
 | `DELETE` | `/shops/{shop_id}` | Bearer (user) | Delete a shop. |
 | `GET` | `/shops/types` | Bearer (user **or** session) | List all shop/business types. |
 
