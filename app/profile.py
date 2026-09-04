@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
@@ -249,17 +249,45 @@ def get_today_notice(
     return [serialize_notice(document)] if document else []
 
 
+@notices_router.delete("/today", status_code=status.HTTP_204_NO_CONTENT)
+def delete_today_notice(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    store_id: Annotated[str | None, Query(max_length=80)] = None,
+    shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
+) -> Response:
+    """Delete today's notice for a shop. JWT required; shop ownership same as POST."""
+    resolved = resolve_store_id(store_id=store_id, shop_id=shop_id)
+    shop = shops.find_one({"_id": parse_object_id(resolved, "Shop")})
+    if shop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    ensure_shop_access(current_user, shop)
+
+    existing = _find_today_notice(resolved)
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notice not found")
+    result = notices.delete_one({"_id": existing["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notice not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @notices_router.get("", response_model=list[Notice], openapi_extra={"security": []})
 def list_today_notices(
     store_id: Annotated[str | None, Query(max_length=80)] = None,
     shop_id: Annotated[str | None, Query(max_length=80, description="Alias of store_id")] = None,
 ) -> list[Notice]:
-    """Today's notices. Public. Optional store_id/shop_id filters to one shop."""
+    """
+    Today's notices. Public. Optional store_id/shop_id filters to one shop.
+
+    Full-day feed is sorted by updated_at ascending (FIFO queue: oldest first) so
+    clients can take the last N entries as the recent notice-board window.
+    """
     notice_date = today_utc().isoformat()
     requested = (store_id or shop_id or "").strip()
     if requested:
         document = _find_today_notice(requested)
         return [serialize_notice(document)] if document else []
 
-    documents = notices.find({"notice_date": notice_date}).sort("updated_at", -1)
+    # FIFO queue: oldest first
+    documents = notices.find({"notice_date": notice_date}).sort("updated_at", 1)
     return [serialize_notice(document) for document in documents]

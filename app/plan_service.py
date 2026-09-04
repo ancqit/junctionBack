@@ -510,7 +510,8 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
 
     application = plan_applications.find_one(
         {"user_id": str(user_id), "status": "pending"},
-        sort=[("created_at", -1)],
+        # FIFO queue: oldest first
+        sort=[("created_at", 1)],
     )
     if application is None:
         raise HTTPException(
@@ -633,6 +634,32 @@ def ensure_shop_has_plan(shop: dict) -> dict:
     return updated or {**shop, "plan": plan}
 
 
+def sync_owner_viewer_from_shop(shop: dict) -> None:
+    """After shop trial/grace expiry, downgrade the linked owner to viewer when safe.
+
+    Conservative: skips admins, non-owners, and owners still on an active paid plan.
+    Only acts when the owner is on free_trial or viewing has not yet been applied.
+    """
+    owner_raw = str(shop.get("owner_user_id") or "").strip()
+    if not owner_raw or not ObjectId.is_valid(owner_raw):
+        return
+
+    user = users.find_one({"_id": ObjectId(owner_raw)})
+    if user is None:
+        return
+    if get_user_role(user) == UserRole.admin:
+        return
+    if get_user_role(user) != UserRole.owner:
+        return
+
+    plan = user.get("plan") or {}
+    if is_paid_plan(plan.get("type")) and plan.get("status") == PlanStatus.active.value:
+        return
+
+    if plan.get("type") == PlanType.free_trial.value or not plan.get("viewing_applied"):
+        downgrade_owner_to_viewer(user)
+
+
 def expire_shop_trial_if_needed(shop: dict) -> dict:
     plan = shop.get("plan")
     if not plan:
@@ -657,7 +684,9 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
         },
         return_document=ReturnDocument.AFTER,
     )
-    return updated or shop
+    result = updated or shop
+    sync_owner_viewer_from_shop(result)
+    return result
 
 
 def expire_shop_paid_plan_if_needed(shop: dict) -> dict:
@@ -713,7 +742,9 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
         },
         return_document=ReturnDocument.AFTER,
     )
-    return updated or shop
+    result = updated or shop
+    sync_owner_viewer_from_shop(result)
+    return result
 
 
 def build_shop_plan_summary(shop: dict) -> PlanSummary:

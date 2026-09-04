@@ -209,7 +209,8 @@ def apply_for_plan(
 def get_my_plan_application(current_user: Annotated[dict, Depends(get_current_user)]) -> PlanApplication | None:
     document = plan_applications.find_one(
         {"user_id": str(current_user["_id"]), "status": ApplicationStatus.pending.value},
-        sort=[("created_at", -1)],
+        # FIFO queue: oldest first
+        sort=[("created_at", 1)],
     )
     if document is None:
         return None
