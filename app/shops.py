@@ -1,9 +1,9 @@
 import re
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -147,6 +147,29 @@ class ShopPhoneStatusUpdate(BaseModel):
         return _strip_required(value, "name")
 
 
+class ShopLockStatusUpdate(BaseModel):
+    """Owner↔viewer lock. Prefer `id`; `name` kept for parity with open/phone-status."""
+
+    id: str | None = Field(default=None, max_length=80)
+    name: str | None = Field(default=None, max_length=160)
+    is_locked: bool
+    lock_reason: Literal["manual", "plan_expired"] | None = None
+
+    @field_validator("id", "name")
+    @classmethod
+    def strip_optional_id_or_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def require_id_or_name(self) -> "ShopLockStatusUpdate":
+        if not self.id and not self.name:
+            raise ValueError("Provide shop id or name")
+        return self
+
+
 class ShopPlanSelectRequest(BaseModel):
     plan_type: PlanType
 
@@ -173,6 +196,9 @@ class Shop(BaseModel):
     digilocker_verified: bool = False
     # Owner GSTIN verification via public GST portal (from users collection).
     gst_verified: bool = False
+    # Viewer mode: manual owner toggle or automatic when plan expires.
+    is_locked: bool = False
+    lock_reason: Literal["manual", "plan_expired"] | None = None
     plan: PlanSummary | None = None
     created_at: datetime
     updated_at: datetime
@@ -249,10 +275,20 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         avatar_url=avatar_url,
         digilocker_verified=bool(owner.get("digilocker_verified")) if owner else False,
         gst_verified=bool(owner.get("gst_verified")) if owner else False,
+        is_locked=bool(document.get("is_locked", False)),
+        lock_reason=_normalize_lock_reason(document.get("lock_reason"), bool(document.get("is_locked", False))),
         plan=plan_summary,
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
+
+
+def _normalize_lock_reason(raw: object, is_locked: bool) -> Literal["manual", "plan_expired"] | None:
+    if not is_locked:
+        return None
+    if raw in ("manual", "plan_expired"):
+        return raw
+    return "manual"
 
 
 def serialize_shops(documents) -> list[Shop]:
@@ -451,6 +487,42 @@ def update_shop_phone_status(
     document = shops.find_one_and_update(
         {"_id": existing["_id"]},
         {"$set": updates},
+        return_document=ReturnDocument.AFTER,
+    )
+    return serialize_shops([document])[0]
+
+
+@router.put("/lock-status", response_model=Shop)
+def update_shop_lock_status(
+    payload: ShopLockStatusUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> Shop:
+    """
+    Set owner vs viewer lock for a shop.
+    Prefer body.id; name is accepted for parity with open-status / phone-status.
+    Body: { "id": "...", "is_locked": true, "lock_reason": "manual" }.
+    """
+    if payload.id:
+        existing = shops.find_one({"_id": parse_object_id(payload.id, "Shop")})
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    else:
+        existing = find_owned_shop_by_name(current_user, payload.name or "")
+    ensure_shop_access(current_user, existing)
+
+    lock_reason: Literal["manual", "plan_expired"] | None = None
+    if payload.is_locked:
+        lock_reason = payload.lock_reason or "manual"
+
+    document = shops.find_one_and_update(
+        {"_id": existing["_id"]},
+        {
+            "$set": {
+                "is_locked": payload.is_locked,
+                "lock_reason": lock_reason,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
     return serialize_shops([document])[0]
