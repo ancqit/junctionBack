@@ -173,7 +173,8 @@ def update_user_role(
 
 @router.get("/viewers", response_model=list[ViewerRecord])
 def list_viewers(_: Annotated[dict, Depends(require_admin)]) -> list[ViewerRecord]:
-    documents = users.find({"role": UserRole.viewer.value}).sort("created_at", -1)
+    # FIFO queue: oldest first
+    documents = users.find({"role": UserRole.viewer.value}).sort("created_at", 1)
     return [serialize_viewer(document) for document in documents]
 
 
@@ -201,7 +202,8 @@ def delete_viewers(
 
 @router.get("/plan-applications", response_model=list[PlanApplication])
 def list_plan_applications(_: Annotated[dict, Depends(require_admin)]) -> list[PlanApplication]:
-    documents = plan_applications.find().sort("created_at", -1)
+    # FIFO queue: oldest first
+    documents = plan_applications.find().sort("created_at", 1)
     return [serialize_application(document) for document in documents]
 
 
