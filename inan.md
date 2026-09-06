@@ -22,7 +22,8 @@ Authorization: Bearer <access_token>
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
-- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`.
+- **QR posters** (`/qr/*`) are public and rate-limited (`RATE_LIMIT_QR`, default `30/minute`). Generated in memory — nothing is stored.
+- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
 
@@ -33,6 +34,29 @@ Authorization: Bearer <access_token>
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
 | `GET` | `/health` | Public | Liveness probe. Returns `{"status":"ok"}`. Set this as the Render Health Check Path. |
+
+---
+
+## QR posters (`/qr`) — local branded generator
+
+Stateless PNG posters for **junction.today** (QR at the bottom of Shops/Services) and **Junction Front Web** (Promotion). Any caller can create and download; the image is built in memory and not saved.
+
+The QR encodes a `junction.today` link for the given city/locality (and optional shop). The poster includes the Junction logo, brand name, junction/shop title, and selected taglines / sayings / thoughts.
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/qr/taglines` | Public | Catalog of taglines, sayings, and thoughts (`id`, `kind`, `en`, `hi`) plus `brand_name`. |
+| `GET` | `/qr/logo.svg` | Public | Junction mark (SVG). |
+| `POST` | `/qr/generate` | Public | Body: `{ "city", "locality?", "shop_name?", "store_id?", "tagline_id?", "saying_ids?", "lang" }`. Returns a PNG download. `saying_ids` max 3; `lang` is `en` or `hi`. Rate-limited. |
+| `GET` | `/qr/generate` | Public | Same as POST via query params (`city` required). |
+
+**Front-end flow**
+1. `GET /qr/taglines` → show a modal / Promotion picker
+2. User selects one or more sayings
+3. `POST /qr/generate` with the current junction (jtoday session city/locality) or shop from overview (Front Web)
+4. Browser downloads the PNG
+
+Also mounted under `/api/qr/*`.
 
 ---
 

@@ -40,6 +40,7 @@ from .fx_rates import router as fx_rates_router
 from .blog import router as blog_router
 from .blog_auth import router as blog_auth_router
 from .gst import router as gst_router
+from .qr import router as qr_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -88,6 +89,7 @@ _routers = (
     blog_router,
     blog_auth_router,
     gst_router,
+    qr_router,
 )
 for _router in _routers:
     app.include_router(_router)

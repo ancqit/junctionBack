@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
     ca-certificates \
+    fonts-dejavu-core \
+    fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
