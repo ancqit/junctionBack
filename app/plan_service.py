@@ -18,8 +18,8 @@ PLAN_YEAR_DAYS = int(os.getenv("PLAN_YEAR_DAYS", os.getenv("PLAN_STARTER_DAYS", 
 
 class PlanType(str, Enum):
     free_trial = "free_trial"
-    serious = "serious"
     starter = "starter"
+    serious = "serious"
     growth = "growth"
     premium = "premium"
 
@@ -32,6 +32,7 @@ class PlanStatus(str, Enum):
     deactivated = "deactivated"
 
 
+# Ascending by price_inr (insertion order drives GET /plans).
 PLAN_CATALOG: dict[str, dict] = {
     PlanType.free_trial.value: {
         "name": "Free Trial",
@@ -41,20 +42,20 @@ PLAN_CATALOG: dict[str, dict] = {
         "description": "Shop profile with up to 40 products for 15 days",
         "duration_days": TRIAL_DAYS,
     },
-    PlanType.serious.value: {
-        "name": "Serious",
-        "price_inr": 1999,
-        "max_products": 40,
-        "profile_only": False,
-        "description": "Direct conversion from Free Trial — keep up to 40 products for 1 year (INR 1999)",
-        "duration_days": PLAN_YEAR_DAYS,
-    },
     PlanType.starter.value: {
         "name": "Starter",
         "price_inr": 999,
         "max_products": 10,
         "profile_only": False,
         "description": "Shop profile with up to 10 products for 1 year (INR 999)",
+        "duration_days": PLAN_YEAR_DAYS,
+    },
+    PlanType.serious.value: {
+        "name": "Serious",
+        "price_inr": 1999,
+        "max_products": 40,
+        "profile_only": False,
+        "description": "Direct conversion from Free Trial — keep up to 40 products for 1 year (INR 1999)",
         "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.growth.value: {

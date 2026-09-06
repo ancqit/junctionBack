@@ -294,6 +294,18 @@ def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) ->
     document["items"] = [serialize_line_item(item) for item in document["items"]]
     result = orders.insert_one(document)
     document["_id"] = result.inserted_id
+
+    if is_junction_session(auth) and payload.customer_phone and payload.customer_email:
+        from .catalog_contacts import upsert_catalog_contact
+
+        upsert_catalog_contact(
+            phone_number=payload.customer_phone,
+            email=str(payload.customer_email),
+            display_name=payload.customer_name,
+            verified=True,
+            order_id=str(result.inserted_id),
+        )
+
     return serialize_order(document)
 
 

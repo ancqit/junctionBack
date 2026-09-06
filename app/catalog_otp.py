@@ -70,17 +70,36 @@ class CatalogOtpVerifyRequest(BaseModel):
     phone_number: str = Field(min_length=8, max_length=20)
     otp: str = Field(pattern=r"^\d{6}$")
     session_info: str = Field(min_length=1)
+    email: str | None = Field(default=None, max_length=254)
+    display_name: str | None = Field(default=None, max_length=100)
 
     @field_validator("phone_number")
     @classmethod
     def normalize_phone(cls, value: str) -> str:
         return normalize_e164_in(value)
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip().lower()
+        return trimmed or None
+
+    @field_validator("display_name")
+    @classmethod
+    def trim_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
+
 
 class CatalogOtpVerifyResponse(BaseModel):
     verified: bool
     phone_number: str
     message: str = "Phone verified"
+    contact_saved: bool = False
 
 
 def normalize_e164_in(value: str) -> str:
@@ -190,4 +209,21 @@ def verify_catalog_otp(request: Request, payload: CatalogOtpVerifyRequest) -> Ca
         raise HTTPException(status_code=401, detail="GCP phone verification did not match the request")
 
     catalog_otp_requests.delete_one({"_id": stored["_id"]})
-    return CatalogOtpVerifyResponse(verified=True, phone_number=payload.phone_number)
+
+    contact_saved = False
+    if payload.email:
+        from .catalog_contacts import upsert_catalog_contact
+
+        upsert_catalog_contact(
+            phone_number=payload.phone_number,
+            email=payload.email,
+            display_name=payload.display_name or stored.get("display_name"),
+            verified=True,
+        )
+        contact_saved = True
+
+    return CatalogOtpVerifyResponse(
+        verified=True,
+        phone_number=payload.phone_number,
+        contact_saved=contact_saved,
+    )
