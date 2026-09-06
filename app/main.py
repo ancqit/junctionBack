@@ -35,6 +35,8 @@ from .shop_payments import router as shop_payments_router
 from .terms import router as terms_router
 from .waitlist import router as waitlist_router
 from .catalog_otp import router as catalog_otp_router
+from .catalog_contacts import router as catalog_contacts_router
+from .fx_rates import router as fx_rates_router
 from .blog import router as blog_router
 from .blog_auth import router as blog_auth_router
 from .gst import router as gst_router
@@ -64,6 +66,8 @@ app.add_middleware(
 _routers = (
     login_router,
     catalog_otp_router,
+    catalog_contacts_router,
+    fx_rates_router,
     session_router,
     digilocker_router,
     profile_router,
