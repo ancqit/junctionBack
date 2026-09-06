@@ -9,3 +9,5 @@ python-multipart==0.0.20
 python-dotenv==1.1.0
 uvicorn[standard]==0.35.0
 dnspython
+qrcode==8.2
+pillow==11.3.0
