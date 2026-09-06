@@ -18,6 +18,7 @@ PLAN_YEAR_DAYS = int(os.getenv("PLAN_YEAR_DAYS", os.getenv("PLAN_STARTER_DAYS", 
 
 class PlanType(str, Enum):
     free_trial = "free_trial"
+    serious = "serious"
     starter = "starter"
     growth = "growth"
     premium = "premium"
@@ -39,6 +40,14 @@ PLAN_CATALOG: dict[str, dict] = {
         "profile_only": False,
         "description": "Shop profile with up to 40 products for 15 days",
         "duration_days": TRIAL_DAYS,
+    },
+    PlanType.serious.value: {
+        "name": "Serious",
+        "price_inr": 1999,
+        "max_products": 40,
+        "profile_only": False,
+        "description": "Direct conversion from Free Trial — keep up to 40 products for 1 year (INR 1999)",
+        "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.starter.value: {
         "name": "Starter",
@@ -147,6 +156,7 @@ def default_plan_document() -> dict:
 
 def is_paid_plan(plan_type: str | None) -> bool:
     return plan_type in {
+        PlanType.serious.value,
         PlanType.starter.value,
         PlanType.growth.value,
         PlanType.premium.value,
