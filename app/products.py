@@ -386,7 +386,7 @@ def list_products(
             query["store_id"] = store_id.strip()
     else:
         apply_store_filter(query, auth["user"], store_id)
-    documents = products.find(query).sort("created_at", -1)
+    documents = products.find(query).sort([("stock_quantity", 1), ("name", 1)])
     return [serialize_product(document) for document in documents]
 
 
@@ -648,3 +648,35 @@ def delete_product(product_id: str, current_user: AuthenticatedUser) -> Response
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Product not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def decrement_stock_for_order_items(store_id: str, items: list[dict]) -> None:
+    """Reduce stock when an order is completed. Floors at zero; skips lines without product_id."""
+    for item in items:
+        product_id = str(item.get("product_id") or "").strip()
+        if not product_id:
+            continue
+        try:
+            quantity = int(item.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        try:
+            oid = parse_object_id(product_id, "Product")
+        except HTTPException:
+            continue
+        product = products.find_one({"_id": oid, "store_id": store_id.strip()})
+        if product is None:
+            continue
+        current = int(product.get("stock_quantity") or 0)
+        next_stock = max(0, current - quantity)
+        products.update_one(
+            {"_id": oid},
+            {
+                "$set": {
+                    "stock_quantity": next_stock,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )

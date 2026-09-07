@@ -36,6 +36,7 @@ class QrGenerateRequest(BaseModel):
     store_id: str | None = Field(default=None, max_length=80)
     tagline_id: str | None = Field(default=None, max_length=40)
     saying_ids: list[str] = Field(default_factory=list, max_length=3)
+    custom_slogan: str | None = Field(default=None, max_length=160)
     lang: str = Field(default="en", max_length=8)
 
 
@@ -55,7 +56,11 @@ def _poster_response(payload: QrGenerateRequest) -> Response:
     locality = (payload.locality or "").strip() or None
     shop_name = (payload.shop_name or "").strip() or None
     store_id = (payload.store_id or "").strip() or None
-    lines = resolve_taglines(payload.saying_ids, fallback=payload.tagline_id)
+    lines = resolve_taglines(
+        payload.saying_ids,
+        fallback=payload.tagline_id,
+        custom_slogan=payload.custom_slogan,
+    )
     url = build_junction_url(city=city, locality=locality, shop_name=shop_name, store_id=store_id)
     place = f"{locality}, {city}" if locality else city
     png = compose_poster(
