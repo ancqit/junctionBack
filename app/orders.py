@@ -321,6 +321,7 @@ def update_order_status(
 ) -> Order:
     """Owner/admin: update order status (confirm / complete / cancel)."""
     document = require_order_access(current_user, order_id)
+    previous = str(document.get("status") or OrderStatus.pending.value)
     updated = orders.find_one_and_update(
         {"_id": document["_id"]},
         {
@@ -333,6 +334,19 @@ def update_order_status(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # Deduct inventory once when the order is completed.
+    if (
+        payload.status == OrderStatus.completed
+        and previous != OrderStatus.completed.value
+    ):
+        from .products import decrement_stock_for_order_items
+
+        decrement_stock_for_order_items(
+            str(document.get("store_id") or ""),
+            list(document.get("items") or []),
+        )
+
     return serialize_order(updated)
 
 

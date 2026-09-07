@@ -45,6 +45,12 @@ TAGLINES: tuple[QrLine, ...] = (
     QrLine(id="find-home", kind="thought", en="Find what you need, closer to home.", hi="जो चाहिए, घर के पास पाएँ।"),
     QrLine(id="one-scan", kind="tagline", en="One scan to your Junction.", hi="एक स्कैन, आपका जंक्शन।"),
     QrLine(id="come-through", kind="saying", en="Come through — the shop is expecting you.", hi="आइए — दुकान आपका इंतज़ार कर रही है।"),
+    QrLine(id="galli-se", kind="saying", en="From your lane, for your lane.", hi="आपकी गली से, आपकी गली के लिए।"),
+    QrLine(id="roz-ka-bazaar", kind="tagline", en="Your everyday bazaar, one scan away.", hi="रोज़ का बाज़ार, एक स्कैन दूर।"),
+    QrLine(id="vishwas", kind="thought", en="Trust lives next door.", hi="भरोसा पड़ोस में रहता है।"),
+    QrLine(id="ghar-ke-paas", kind="saying", en="Shop closer. Live easier.", hi="पास से खरीदें। आसान ज़िंदगी जिएँ।"),
+    QrLine(id="apna-junction", kind="tagline", en="This is your Junction.", hi="यह आपका जंक्शन है।"),
+    QrLine(id="muskaan", kind="saying", en="A smile at the counter beats a long delivery wait.", hi="काउंटर की मुस्कान, लंबी डिलीवरी से बेहतर।"),
 )
 
 TAGLINE_BY_ID = {line.id: line for line in TAGLINES}
@@ -57,7 +63,12 @@ LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" v
 """
 
 
-def resolve_taglines(ids: list[str] | None, *, fallback: str | None = None) -> list[QrLine]:
+def resolve_taglines(
+    ids: list[str] | None,
+    *,
+    fallback: str | None = None,
+    custom_slogan: str | None = None,
+) -> list[QrLine]:
     picked: list[QrLine] = []
     seen: set[str] = set()
     for raw in ids or []:
@@ -72,6 +83,12 @@ def resolve_taglines(ids: list[str] | None, *, fallback: str | None = None) -> l
         line = TAGLINE_BY_ID.get(fallback.strip())
         if line:
             picked.append(line)
+    custom = (custom_slogan or "").strip()
+    if custom:
+        # Custom slogan counts toward the three-line poster budget.
+        if len(picked) >= 3:
+            picked = picked[:2]
+        picked.append(QrLine(id="custom", kind="custom", en=custom, hi=custom))
     if not picked:
         picked.append(TAGLINES[0])
     return picked
@@ -260,13 +277,13 @@ def compose_poster(
     caption_y = card_y + card.size[1] + 36
     for line in lines:
         text = line.hi if use_hi else line.en
-        font = _load_font(30, bold=True, devanagari=_has_devanagari(text))
+        font = _load_font(22, bold=True, devanagari=_has_devanagari(text))
         wrapped = _wrap(draw, text, font, POSTER_W - 120)
         for row in wrapped:
             tw = _text_width(draw, row, font)
             draw.text(((POSTER_W - tw) / 2, caption_y), row, font=font, fill=FOREST)
-            caption_y += 40
-        caption_y += 10
+            caption_y += 30
+        caption_y += 8
 
     foot_font = _load_font(22, bold=True)
     foot = JUNCTION_TODAY_URL.replace("https://", "").replace("http://", "")
