@@ -81,16 +81,17 @@ def upsert_catalog_contact(
     email_norm = email.strip().lower()
     phone = normalize_e164_in(phone_number)
 
+    # Do not put `order_ids` in both $setOnInsert and $addToSet — Mongo rejects that path conflict.
+    set_on_insert: dict = {
+        "phone_number": phone,
+        "created_at": now,
+    }
     update: dict = {
         "$set": {
             "email": email_norm,
             "updated_at": now,
         },
-        "$setOnInsert": {
-            "phone_number": phone,
-            "created_at": now,
-            "order_ids": [],
-        },
+        "$setOnInsert": set_on_insert,
     }
     if display_name:
         update["$set"]["display_name"] = display_name.strip()
@@ -99,6 +100,8 @@ def upsert_catalog_contact(
         update["$set"]["verified_at"] = now
     if order_id:
         update["$addToSet"] = {"order_ids": order_id}
+    else:
+        set_on_insert["order_ids"] = []
 
     catalog_contacts.create_index("phone_number", unique=True)
     catalog_contacts.update_one({"phone_number": phone}, update, upsert=True)
