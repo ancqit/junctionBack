@@ -296,15 +296,19 @@ def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) ->
     document["_id"] = result.inserted_id
 
     if is_junction_session(auth) and payload.customer_phone and payload.customer_email:
-        from .catalog_contacts import upsert_catalog_contact
+        try:
+            from .catalog_contacts import upsert_catalog_contact
 
-        upsert_catalog_contact(
-            phone_number=payload.customer_phone,
-            email=str(payload.customer_email),
-            display_name=payload.customer_name,
-            verified=True,
-            order_id=str(result.inserted_id),
-        )
+            upsert_catalog_contact(
+                phone_number=payload.customer_phone,
+                email=str(payload.customer_email),
+                display_name=payload.customer_name,
+                verified=True,
+                order_id=str(result.inserted_id),
+            )
+        except Exception:
+            # Order already saved — contact index is best-effort.
+            pass
 
     return serialize_order(document)
 
