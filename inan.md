@@ -23,17 +23,25 @@ Authorization: Bearer <access_token>
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
 - **QR posters** (`/qr/*`) are public and rate-limited (`RATE_LIMIT_QR`, default `30/minute`). Generated in memory — nothing is stored.
-- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
+- **Public (no JWT):** `/live`, `/ready`, `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
-- **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
+- **Render health check:** use `GET /health` (same as `/ready`). It pings Mongo with a short timeout and checks required config. It does **not** call Pexels, OTP, or other vendors. Use `GET /live` if you only need a process heartbeat.
 
 ---
 
 ## Health
 
+The backend is a closed unit: it stays up while the process is alive, and it only takes traffic when Atlas and required secrets are in place. Probes do not wait on Vercel, Pexels, GCP OTP, or Nominatim.
+
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/health` | Public | Liveness probe. Returns `{"status":"ok"}`. Set this as the Render Health Check Path. |
+| `GET` | `/live` | Public | Process heartbeat. No Mongo. Always fast. Also at `/health/live`. |
+| `GET` | `/ready` | Public | Unit is ready: `JWT_SECRET` (≥32 chars), a real `MONGODB_URL`, and a Mongo ping capped at `HEALTH_TIMEOUT_MS` (default **1500ms**). **200** `{ "status": "ok", "unit": "junction-backend", "mode": "ready", "checks": { "process", "config", "mongo" } }`. **503** if config or Mongo is down. |
+| `GET` | `/health` | Public | Same as `/ready`. Set this as the Render Health Check Path (not `/docs`). |
+
+Also mounted under `/api/live`, `/api/ready`, `/api/health`.
+
+User routes are unchanged. A failed probe does not add work to shops or orders. When Atlas is unreachable, `/health` fails in ~1.5s instead of hanging; shop/order calls fail in `MONGODB_SERVER_SELECTION_TIMEOUT_MS` (default **5s**) instead of 10s.
 
 ---
 

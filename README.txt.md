@@ -17,6 +17,8 @@ In PowerShell, run `Copy-Item .env.example .env`, edit `.env`, and run `docker c
 
 Open <http://localhost:8000/docs> for interactive API documentation.
 
+`GET /health` (same as `/ready`) is the closed-unit probe: Mongo ping + required secrets, short timeout. `GET /live` is a process heartbeat only. On Render, set Health Check Path to `/health`.
+
 ## Login and profile API
 
 `POST /auth/register` creates the account and initial profile. `POST /auth/login`
