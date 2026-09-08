@@ -16,7 +16,7 @@ JUNCTION_TODAY_URL = os.getenv("JUNCTION_TODAY_URL", "https://junction.today").r
 
 FOREST = (25, 75, 49)
 FOREST_DARK = (16, 48, 32)
-GOLD = (213, 189, 107)
+GOLD = (243, 215, 130)
 CREAM = (255, 252, 245)
 INK = (36, 48, 42)
 MUTED = (90, 104, 96)
@@ -56,9 +56,8 @@ TAGLINES: tuple[QrLine, ...] = (
 TAGLINE_BY_ID = {line.id: line for line in TAGLINES}
 
 LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Junction">
-  <rect width="256" height="256" rx="56" fill="#194B31"/>
-  <circle cx="128" cy="128" r="92" fill="none" stroke="#D5BD6B" stroke-width="14"/>
-  <text x="128" y="168" text-anchor="middle" font-family="Georgia, Times New Roman, serif" font-size="140" font-weight="700" fill="#D5BD6B">J</text>
+  <rect width="256" height="256" rx="85" fill="#f3d782"/>
+  <text x="128" y="178" text-anchor="middle" font-family="Georgia, Times New Roman, serif" font-size="148" font-weight="700" fill="#194b31">J</text>
 </svg>
 """
 
@@ -149,20 +148,18 @@ def _has_devanagari(text: str) -> bool:
 
 
 def draw_brand_mark(size: int = 160) -> Image.Image:
-    """Forest rounded square with a gold J — the Junction mark."""
+    """Gold rounded square with a forest J — the Front Web login mark."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad = max(2, size // 32)
-    draw.rounded_rectangle((pad, pad, size - pad, size - pad), radius=size // 5, fill=FOREST)
-    ring_pad = size * 0.16
-    draw.ellipse((ring_pad, ring_pad, size - ring_pad, size - ring_pad), outline=GOLD, width=max(4, size // 18))
-    font = _load_font(int(size * 0.58), bold=True)
+    pad = max(1, size // 40)
+    draw.rounded_rectangle((pad, pad, size - pad, size - pad), radius=int(size * (12 / 36)), fill=GOLD)
+    font = _load_font(int(size * 0.62), bold=True)
     letter = "J"
     bbox = draw.textbbox((0, 0), letter, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = (size - tw) / 2 - bbox[0]
-    y = (size - th) / 2 - bbox[1] - size * 0.03
-    draw.text((x, y), letter, font=font, fill=GOLD)
+    y = (size - th) / 2 - bbox[1] - size * 0.02
+    draw.text((x, y), letter, font=font, fill=FOREST)
     return img
 
 
@@ -238,57 +235,68 @@ def compose_poster(
     poster = Image.new("RGB", (POSTER_W, POSTER_H), CREAM)
     draw = ImageDraw.Draw(poster)
 
-    draw.rectangle((0, 0, POSTER_W, 168), fill=FOREST)
-    draw.rectangle((0, POSTER_H - 88, POSTER_W, POSTER_H), fill=FOREST)
+    draw.rectangle((0, 0, POSTER_W, 132), fill=FOREST)
+    draw.rectangle((0, POSTER_H - 120, POSTER_W, POSTER_H), fill=FOREST)
 
-    mark = draw_brand_mark(112)
+    mark = draw_brand_mark(76)
     poster.paste(mark, (48, 28), mark)
 
-    title_font = _load_font(56, bold=True)
-    draw.text((188, 48), BRAND_NAME.upper(), font=title_font, fill=GOLD)
-    kicker_font = _load_font(22, bold=True)
-    draw.text((188, 112), "Scan to visit this Junction", font=kicker_font, fill=GOLD)
+    title_font = _load_font(42, bold=True)
+    draw.text((148, 42), BRAND_NAME, font=title_font, fill=GOLD)
+    kicker_font = _load_font(18, bold=True)
+    draw.text((148, 92), "Scan for this Junction", font=kicker_font, fill=GOLD)
 
-    y = 210
-    place_font = _load_font(28, bold=True, devanagari=_has_devanagari(junction_label))
-    for row in _wrap(draw, junction_label, place_font, POSTER_W - 96):
-        draw.text((48, y), row, font=place_font, fill=MUTED)
-        y += 36
-
+    y = 176
     if shop_name and shop_name.strip():
         shop = shop_name.strip()
-        shop_font = _load_font(44, bold=True, devanagari=_has_devanagari(shop))
-        y += 8
+        shop_font = _load_font(40, bold=True, devanagari=_has_devanagari(shop))
         for row in _wrap(draw, shop, shop_font, POSTER_W - 96):
-            draw.text((48, y), row, font=shop_font, fill=INK)
-            y += 52
+            tw = _text_width(draw, row, shop_font)
+            draw.text(((POSTER_W - tw) / 2, y), row, font=shop_font, fill=INK)
+            y += 48
+        y += 4
+
+    place_font = _load_font(24, bold=True, devanagari=_has_devanagari(junction_label))
+    for row in _wrap(draw, junction_label, place_font, POSTER_W - 96):
+        tw = _text_width(draw, row, place_font)
+        draw.text(((POSTER_W - tw) / 2, y), row, font=place_font, fill=MUTED)
+        y += 32
 
     qr = _qr_image(payload, box_size=14)
-    qr_size = 640
+    qr_size = 620
     qr = qr.resize((qr_size, qr_size), Image.Resampling.NEAREST)
-    card = Image.new("RGB", (qr_size + 56, qr_size + 56), WHITE)
+    card = Image.new("RGB", (qr_size + 48, qr_size + 48), WHITE)
     card_draw = ImageDraw.Draw(card)
-    card_draw.rounded_rectangle((0, 0, card.size[0] - 1, card.size[1] - 1), radius=28, outline=GOLD, width=4)
-    card.paste(qr.convert("RGB"), (28, 28))
+    card_draw.rounded_rectangle((0, 0, card.size[0] - 1, card.size[1] - 1), radius=24, outline=GOLD, width=3)
+    card.paste(qr.convert("RGB"), (24, 24))
     card_x = (POSTER_W - card.size[0]) // 2
-    card_y = min(max(y + 28, 360), 430)
+    card_y = min(max(y + 36, 320), 400)
     poster.paste(card, (card_x, card_y))
 
-    caption_y = card_y + card.size[1] + 36
-    for line in lines:
+    caption_y = card_y + card.size[1] + 40
+    shown = lines[:2]
+    for line in shown:
         text = line.hi if use_hi else line.en
-        font = _load_font(22, bold=True, devanagari=_has_devanagari(text))
-        wrapped = _wrap(draw, text, font, POSTER_W - 120)
+        font = _load_font(24, bold=True, devanagari=_has_devanagari(text))
+        wrapped = _wrap(draw, text, font, POSTER_W - 140)
         for row in wrapped:
             tw = _text_width(draw, row, font)
             draw.text(((POSTER_W - tw) / 2, caption_y), row, font=font, fill=FOREST)
-            caption_y += 30
-        caption_y += 8
+            caption_y += 32
+        caption_y += 6
 
-    foot_font = _load_font(22, bold=True)
+    saying = (shown[0].hi if use_hi else shown[0].en) if shown else TAGLINES[0].en
+    saying_font = _load_font(18, bold=True, devanagari=_has_devanagari(saying))
+    saying_lines = _wrap(draw, saying, saying_font, POSTER_W - 120)
+    foot_font = _load_font(20, bold=True)
     foot = JUNCTION_TODAY_URL.replace("https://", "").replace("http://", "")
+    footer_y = POSTER_H - 88
+    for row in saying_lines[:2]:
+        tw = _text_width(draw, row, saying_font)
+        draw.text(((POSTER_W - tw) / 2, footer_y), row, font=saying_font, fill=GOLD)
+        footer_y += 24
     tw = _text_width(draw, foot, foot_font)
-    draw.text(((POSTER_W - tw) / 2, POSTER_H - 58), foot, font=foot_font, fill=GOLD)
+    draw.text(((POSTER_W - tw) / 2, POSTER_H - 42), foot, font=foot_font, fill=GOLD)
 
     buffer = io.BytesIO()
     poster.save(buffer, format="PNG", optimize=True)
