@@ -65,6 +65,7 @@ class TokenResponse(BaseModel):
     user: UserSummary
     plan: PlanSummary
     role: UserRole
+    has_mpin: bool = False
 
 
 class RoleInfo(BaseModel):
@@ -77,6 +78,7 @@ class AuthMeResponse(BaseModel):
     user: UserSummary
     role: UserRole
     plan: PlanSummary
+    has_mpin: bool = False
 
 
 AVAILABLE_ROLES = [
@@ -84,6 +86,44 @@ AVAILABLE_ROLES = [
     RoleInfo(value=UserRole.owner, label="Owner", description="Store owner with full business access"),
     RoleInfo(value=UserRole.viewer, label="Viewer", description="Read-only access to business data"),
 ]
+
+
+MPIN_PATTERN = r"^\d{4,6}$"
+
+
+class MpinStatusRequest(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+
+
+class MpinStatusResponse(BaseModel):
+    phone_number: str
+    has_mpin: bool
+    known_user: bool = False
+
+
+class MpinLoginRequest(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+    mpin: str = Field(pattern=MPIN_PATTERN)
+
+
+class MpinSetupRequest(BaseModel):
+    mpin: str = Field(pattern=MPIN_PATTERN)
+
+
+class MpinResetRequest(BaseModel):
+    phone_number: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+    otp: str = Field(pattern=r"^\d{6}$")
+    session_info: str = Field(min_length=1)
+    mpin: str = Field(pattern=MPIN_PATTERN)
+    display_name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def trim_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
 
 
 class OtpRequest(BaseModel):
@@ -341,6 +381,7 @@ def token_response(user: dict | None) -> TokenResponse:
         user=user_summary(user),
         plan=plan,
         role=role,
+        has_mpin=bool((user.get("mpin_hash") or "").strip()),
     )
 
 
@@ -406,6 +447,7 @@ def read_current_session(current_user: Annotated[dict, Depends(get_current_user)
         user=user_summary(current_user),
         role=role,
         plan=build_plan_summary(current_user),
+        has_mpin=bool((current_user.get("mpin_hash") or "").strip()),
     )
 
 
@@ -537,6 +579,132 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
     user = users.find_one_and_update(
         {"_id": user["_id"]},
         {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return token_response(user)
+
+
+@router.post("/mpin/status", response_model=MpinStatusResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def mpin_status(request: Request, payload: MpinStatusRequest) -> MpinStatusResponse:
+    """Public check: whether this phone already has an MPIN (returning login path)."""
+    user = users.find_one({"phone_number": payload.phone_number})
+    has_mpin = bool(user and (user.get("mpin_hash") or "").strip())
+    return MpinStatusResponse(
+        phone_number=payload.phone_number,
+        has_mpin=has_mpin,
+        known_user=user is not None,
+    )
+
+
+@router.post("/mpin/login", response_model=TokenResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def mpin_login(request: Request, payload: MpinLoginRequest) -> TokenResponse:
+    """Returning owner login with MPIN (no SMS)."""
+    user = users.find_one({"phone_number": payload.phone_number})
+    stored = (user or {}).get("mpin_hash") or ""
+    if user is None or not stored or not verify_password(payload.mpin, stored):
+        raise HTTPException(status_code=401, detail="Invalid phone number or MPIN")
+    return token_response(user)
+
+
+@router.post("/mpin/setup", response_model=TokenResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def mpin_setup(
+    request: Request,
+    payload: MpinSetupRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> TokenResponse:
+    """Set or replace MPIN while authenticated (after OTP verify, or logged-in change)."""
+    now = datetime.now(timezone.utc)
+    updated = users.find_one_and_update(
+        {"_id": current_user["_id"]},
+        {
+            "$set": {
+                "mpin_hash": hash_password(payload.mpin),
+                "mpin_set_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return token_response(updated)
+
+
+@router.post("/mpin/reset", response_model=TokenResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def mpin_reset(request: Request, payload: MpinResetRequest) -> TokenResponse:
+    """Forgot MPIN: verify SMS OTP, set a new MPIN, and issue a session."""
+    require_gcp_otp_configuration()
+    now = datetime.now(timezone.utc)
+    session_hash = hashlib.sha256(payload.session_info.encode()).hexdigest()
+    otp_doc = otp_requests.find_one(
+        {
+            "phone_number": payload.phone_number,
+            "session_hash": session_hash,
+            "expires_at": {"$gt": now},
+        }
+    )
+    if otp_doc is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired OTP session")
+    try:
+        response = httpx.post(
+            GCP_VERIFY_OTP_URL,
+            params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
+            json={"sessionInfo": payload.session_info, "code": payload.otp},
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Unable to reach GCP Identity Platform") from exc
+    if response.is_error:
+        raise gcp_error(response)
+    verified_phone = response.json().get("phoneNumber")
+    gcp_user_id = response.json().get("localId")
+    if verified_phone != payload.phone_number or not gcp_user_id:
+        raise HTTPException(status_code=401, detail="GCP phone verification did not match the request")
+
+    otp_requests.delete_one({"_id": otp_doc["_id"]})
+    users.create_index("phone_number", unique=True, sparse=True)
+    display_name = (payload.display_name or otp_doc.get("display_name") or "Junction owner").strip()
+    user = users.find_one({"phone_number": payload.phone_number})
+    if user is None:
+        document = {
+            "phone_number": payload.phone_number,
+            "mobile_verified": True,
+            "gcp_identity_id": gcp_user_id,
+            "display_name": display_name,
+            "mpin_hash": hash_password(payload.mpin),
+            "mpin_set_at": now,
+            "role": resolve_role_for_user(phone_number=payload.phone_number),
+            "account_status": "active",
+            "bio": None,
+            "avatar_url": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            result = users.insert_one(document)
+            if resolve_role_for_user(phone_number=payload.phone_number) != UserRole.admin.value:
+                initialize_user_plan(result.inserted_id)
+            user = users.find_one({"_id": result.inserted_id})
+        except DuplicateKeyError:
+            user = users.find_one({"phone_number": payload.phone_number})
+    if user is None:
+        raise HTTPException(status_code=500, detail="Could not create or load user after MPIN reset")
+    user = users.find_one_and_update(
+        {"_id": user["_id"]},
+        {
+            "$set": {
+                "mobile_verified": True,
+                "gcp_identity_id": gcp_user_id,
+                "display_name": display_name,
+                "mpin_hash": hash_password(payload.mpin),
+                "mpin_set_at": now,
+                "updated_at": now,
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
     return token_response(user)

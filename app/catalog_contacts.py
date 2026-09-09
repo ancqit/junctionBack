@@ -1,17 +1,28 @@
 """Verified junction.today shopper contacts (phone + email) and their orders.
 
 Created/updated when catalog SMS OTP succeeds or when a junction.today order
-is placed with contact fields. Returning shoppers who match phone+email can
-skip a fresh OTP (reduce SMS cost).
+is placed with contact fields. Returning shoppers unlock with MPIN after an
+initial OTP setup (forgot MPIN re-runs OTP).
 """
 
+import hashlib
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from pymongo import ReturnDocument
 
 from .catalog_otp import normalize_e164_in
-from .database import catalog_contacts, orders
+from .database import catalog_contacts, catalog_otp_requests, orders
+from .login import (
+    GCP_IDENTITY_PLATFORM_API_KEY,
+    GCP_VERIFY_OTP_URL,
+    gcp_error,
+    hash_password,
+    require_gcp_otp_configuration,
+    verify_password,
+)
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter(prefix="/auth/catalog-contacts", tags=["catalog-contacts"])
@@ -53,6 +64,7 @@ class CatalogContactSummary(BaseModel):
     verified: bool = False
     order_count: int = 0
     recognized: bool = False
+    has_mpin: bool = False
 
 
 class CatalogContactOrder(BaseModel):
@@ -66,6 +78,50 @@ class CatalogContactOrder(BaseModel):
     currency: str
     status: str
     created_at: datetime
+
+
+MPIN_PATTERN = r"^\d{4,6}$"
+
+
+class CatalogMpinLoginRequest(BaseModel):
+    phone_number: str = Field(min_length=8, max_length=20)
+    email: EmailStr
+    mpin: str = Field(pattern=MPIN_PATTERN)
+
+    @field_validator("phone_number")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        return normalize_e164_in(value)
+
+
+class CatalogMpinSetupRequest(BaseModel):
+    phone_number: str = Field(min_length=8, max_length=20)
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{6}$")
+    session_info: str = Field(min_length=1)
+    mpin: str = Field(pattern=MPIN_PATTERN)
+    display_name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("phone_number")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        return normalize_e164_in(value)
+
+    @field_validator("display_name")
+    @classmethod
+    def trim_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
+
+
+class CatalogMpinAuthResponse(BaseModel):
+    verified: bool
+    phone_number: str
+    email: str
+    has_mpin: bool = True
+    message: str = "Authenticated"
 
 
 def upsert_catalog_contact(
@@ -132,6 +188,7 @@ def recognize_catalog_contact(
             verified=False,
             recognized=False,
             order_count=0,
+            has_mpin=False,
         )
 
     order_ids = doc.get("order_ids") or []
@@ -142,6 +199,90 @@ def recognize_catalog_contact(
         verified=True,
         recognized=True,
         order_count=len(order_ids),
+        has_mpin=bool((doc.get("mpin_hash") or "").strip()),
+    )
+
+
+@router.post("/mpin/login", response_model=CatalogMpinAuthResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def catalog_mpin_login(request: Request, payload: CatalogMpinLoginRequest) -> CatalogMpinAuthResponse:
+    """Returning shopper unlock with MPIN (no SMS)."""
+    doc = find_verified_contact(payload.phone_number, str(payload.email))
+    stored = (doc or {}).get("mpin_hash") or ""
+    if doc is None or not stored or not verify_password(payload.mpin, stored):
+        raise HTTPException(status_code=401, detail="Invalid contact or MPIN")
+    return CatalogMpinAuthResponse(
+        verified=True,
+        phone_number=doc["phone_number"],
+        email=doc.get("email") or str(payload.email).strip().lower(),
+        has_mpin=True,
+        message="MPIN verified",
+    )
+
+
+@router.post("/mpin/setup", response_model=CatalogMpinAuthResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def catalog_mpin_setup(request: Request, payload: CatalogMpinSetupRequest) -> CatalogMpinAuthResponse:
+    """After SMS OTP: set or reset MPIN for this phone+email contact."""
+    require_gcp_otp_configuration()
+    now = datetime.now(timezone.utc)
+    session_hash = hashlib.sha256(payload.session_info.encode()).hexdigest()
+    stored = catalog_otp_requests.find_one(
+        {
+            "phone_number": payload.phone_number,
+            "session_hash": session_hash,
+            "expires_at": {"$gt": now},
+        }
+    )
+    if stored is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired OTP session")
+
+    try:
+        response = httpx.post(
+            GCP_VERIFY_OTP_URL,
+            params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
+            json={"sessionInfo": payload.session_info, "code": payload.otp},
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Unable to reach GCP Identity Platform") from exc
+    if response.is_error:
+        raise gcp_error(response)
+
+    verified_phone = response.json().get("phoneNumber")
+    if verified_phone != payload.phone_number:
+        raise HTTPException(status_code=401, detail="GCP phone verification did not match the request")
+
+    catalog_otp_requests.delete_one({"_id": stored["_id"]})
+    upsert_catalog_contact(
+        phone_number=payload.phone_number,
+        email=str(payload.email),
+        display_name=payload.display_name or stored.get("display_name"),
+        verified=True,
+    )
+    email_norm = str(payload.email).strip().lower()
+    doc = catalog_contacts.find_one_and_update(
+        {"phone_number": payload.phone_number},
+        {
+            "$set": {
+                "email": email_norm,
+                "mpin_hash": hash_password(payload.mpin),
+                "mpin_set_at": now,
+                "verified": True,
+                "verified_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        raise HTTPException(status_code=500, detail="Could not save contact MPIN")
+    return CatalogMpinAuthResponse(
+        verified=True,
+        phone_number=doc["phone_number"],
+        email=email_norm,
+        has_mpin=True,
+        message="MPIN saved",
     )
 
 
