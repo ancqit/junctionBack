@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 EFFECTIVE_DATE = "11 September 2026"
 COMPANY_NAME = "Sunskriti Data Management Company"
 APP_NAME = "Junction"
-GRIEVANCE_EMAIL = "grievance@junction.today"
+GRIEVANCE_URL = "https://junction.blog"
 SUPPORT_CHANNEL = "the Junction app or website"
 
 TERMS_CONTENT = f"""TERMS AND CONDITIONS
@@ -97,9 +97,8 @@ By agreeing to these Terms, sellers consent that any material violation may be r
 11. Grievance Redressal
 - A Grievance Officer is appointed to handle complaints relating to these Terms and the platform.
 - Complaints will be acknowledged within 48 hours and resolved within 30 days as far as practicable.
-- Grievance Officer (for {COMPANY_NAME} / {APP_NAME}):
-  Email: {GRIEVANCE_EMAIL}
-  Channel: {SUPPORT_CHANNEL}
+- Grievance contact (for {COMPANY_NAME} / {APP_NAME}): {GRIEVANCE_URL}
+- You may also reach us through {SUPPORT_CHANNEL}.
 
 12. Limitation of Liability
 - We act as an intermediary technology platform and are not a party to disputes solely between buyers and sellers, except as required by applicable e-commerce or consumer law.
@@ -158,16 +157,14 @@ Under the Digital Personal Data Protection Act, 2023, you may have the right to:
 - Request correction or erasure, subject to legal retention needs.
 - Withdraw consent where processing is based on consent.
 - Lodge complaints with the Data Protection Board of India.
-Requests may be made through {SUPPORT_CHANNEL} or {GRIEVANCE_EMAIL}.
+Requests may be made through {SUPPORT_CHANNEL} or {GRIEVANCE_URL}.
 
 7. Cookies and Tracking
 We may use cookies and similar technologies to operate the service, remember preferences, and understand usage. You may disable cookies in your browser; some features may not work fully.
 
 8. Grievance Officer
-Grievance Officer for privacy concerns:
-{COMPANY_NAME} — {APP_NAME}
-Email: {GRIEVANCE_EMAIL}
-Channel: {SUPPORT_CHANNEL}
+Grievance contact for privacy concerns ({COMPANY_NAME} — {APP_NAME}): {GRIEVANCE_URL}
+You may also use {SUPPORT_CHANNEL}.
 
 9. Changes to this Policy
 We may update this Privacy Policy from time to time. Changes will be posted on the platform with an updated effective date or version.
