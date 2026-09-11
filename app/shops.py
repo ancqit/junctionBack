@@ -73,6 +73,7 @@ class ShopCreate(BaseModel):
     is_open: bool = True
     show_phone: bool = False
     shop_type: str | None = Field(default=None, max_length=80, description="Catalog shop type value")
+    currency: str = Field(default="INR", min_length=3, max_length=3, description="ISO 4217 market currency")
 
     @field_validator("name")
     @classmethod
@@ -96,6 +97,14 @@ class ShopCreate(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        code = (value or "INR").strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            raise ValueError("currency must be a 3-letter ISO code")
+        return code
 
     @field_validator("open_time")
     @classmethod
@@ -123,6 +132,7 @@ class ShopUpdate(BaseModel):
     is_open: bool | None = None
     show_phone: bool | None = None
     shop_type: str | None = Field(default=None, max_length=80)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
 
     @field_validator("name", "city", "locality")
     @classmethod
@@ -153,6 +163,16 @@ class ShopUpdate(BaseModel):
     @classmethod
     def validate_shop_type(cls, value: str | None) -> str | None:
         return _normalize_shop_type(value)
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_optional_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            raise ValueError("currency must be a 3-letter ISO code")
+        return code
 
 
 class ShopOpenStatusUpdate(BaseModel):
@@ -215,6 +235,7 @@ class Shop(BaseModel):
     is_open: bool = True
     show_phone: bool = False
     phone_number: str | None = None
+    currency: str = "INR"
     owner_user_id: str
     shop_type: str | None = None
     shop_type_label: str | None = None
@@ -286,6 +307,12 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         avatar_url = avatar_url.strip() or None
     else:
         avatar_url = None
+    currency_raw = document.get("currency")
+    currency = (
+        currency_raw.strip().upper()
+        if isinstance(currency_raw, str) and currency_raw.strip()
+        else "INR"
+    )
     return Shop(
         id=str(document["_id"]),
         name=document["name"],
@@ -297,6 +324,7 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         is_open=bool(document.get("is_open", True)),
         show_phone=bool(document.get("show_phone", False)),
         phone_number=phone,
+        currency=currency,
         owner_user_id=document["owner_user_id"],
         shop_type=shop_type,
         shop_type_label=_shop_type_label(shop_type),
@@ -605,6 +633,7 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "is_open": payload.is_open,
         "show_phone": payload.show_phone,
         "phone_number": phone_number,
+        "currency": payload.currency,
         "owner_user_id": str(current_user["_id"]),
         "shop_type": payload.shop_type,
         "plan": default_plan_document(),
