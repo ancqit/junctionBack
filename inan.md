@@ -445,14 +445,15 @@ Prefer **`GET/POST /shops/{shop_id}/plan*`** for limits. Legacy **`/plans/me`** 
 
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/terms-and-conditions` | Public | Returns title, version, content, and `updated_at`. |
+| `GET` | `/terms-and-conditions` | Public | Returns title, version, content, `documents[]`, and `updated_at`. |
 
-Content is configurable via Render env vars without code changes:
+Prefer JSON on Render (update without redeploying):
 
-- `TERMS_AND_CONDITIONS_TITLE`
-- `TERMS_AND_CONDITIONS_VERSION`
-- `TERMS_AND_CONDITIONS_CONTENT`
-- Or `TERMS_AND_CONDITIONS_JSON` for full JSON: `{"title":"...","version":"...","content":"..."}`
+- `TERMS_AND_CONDITIONS_JSON` — preferred. Shape:
+  `{"title":"Junction Legal","version":"2.0","documents":[{"id":"terms","title":"Terms & Conditions","content":"..."},{"id":"privacy","title":"Privacy Policy","content":"..."},{"id":"addendum","title":"Customer Addendum","content":"..."}]}`
+- Legacy: `TERMS_AND_CONDITIONS_TITLE`, `TERMS_AND_CONDITIONS_VERSION`, `TERMS_AND_CONDITIONS_CONTENT`
+- If JSON has empty `content` and no `documents`, the API returns the built-in Sunskriti / Junction legal pack (not an empty body).
+- Paste-ready example: `docs/TERMS_AND_CONDITIONS_JSON.example.json`
 
 ---
 
