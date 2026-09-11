@@ -461,11 +461,15 @@ Prefer JSON on Render (update without redeploying):
 
 All endpoints require **admin** role.
 
+Phone numbers are the primary ops key. Users without a phone cannot create a shop (`can_create_shop=false`).
+
 | Method | Endpoint | Use |
 |--------|----------|-----|
-| `GET` | `/admin/users` | List all users with role and plan status. |
-| `POST` | `/admin/users/{user_id}/activate` | Approve a viewer's pending waitlist application — upgrades them to `owner` with their requested plan. |
-| `PATCH` | `/admin/users/{user_id}/role` | Change user role (`owner` / `viewer`). Body: `{ "role": "viewer" }`. Admins are not set here — use admin list. |
+| `GET` | `/admin/users` | List users with phone-first fields, plan status, shop briefs, and `can_create_shop`. Query: `q` (phone/name/email), `role`, `has_shop`, `has_phone`. |
+| `GET` | `/admin/users/by-phone` | Primary lookup by phone (`?phone=`). Normalizes `10`-digit / `91…` forms to `+91…`. |
+| `POST` | `/admin/users/{user_id}/activate` | Approve a viewer's pending waitlist application — upgrades them to `owner` with their requested plan (syncs shop plan when `shop_id` is set). |
+| `PATCH` | `/admin/users/{user_id}/role` | Change user role (`owner` / `viewer` / `admin`). Body: `{ "role": "viewer" }`. Prefer admin list for production admins. |
+| `PATCH` | `/admin/users/{user_id}/plan` | Assign a paid plan. Body: `{ "plan_type": "starter" \| "serious" \| "growth" \| "premium", "sync_shops": true }`. Sets role to `owner`. |
 | `GET` | `/admin/role-keeper` | Read MongoDB role keeper (owner/viewer phone → role map). |
 | `PUT` | `/admin/role-keeper` | Update role keeper mappings. Admins cannot be added here. |
 | `GET` | `/admin/admins` | View loaded admin list (from env vars + `admin.json`). |
@@ -475,6 +479,7 @@ All endpoints require **admin** role.
 | `DELETE` | `/admin/viewers` | Alias for `DELETE /admin/users`. |
 | `GET` | `/admin/plan-applications` | List all plan applications (shop name, identity, location, requested plan, switch status). |
 | `GET` | `/admin/waitlist` | Alias for `/admin/plan-applications`. |
+| `POST` | `/admin/plan-applications/{application_id}/reject` | Reject a pending waitlist application. Body: optional `{ "reason": "…" }`. |
 
 **Admin access in production (Render):**
 ```

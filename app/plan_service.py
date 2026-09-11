@@ -575,6 +575,16 @@ def admin_activate_viewer_from_waitlist(user_id: ObjectId) -> PlanSummary:
         {"_id": application["_id"]},
         {"$set": {"status": "approved", "approved_at": now, "updated_at": now}},
     )
+
+    # Keep shop plan in sync with the approved request when a shop is attached.
+    shop_id = application.get("shop_id")
+    if isinstance(shop_id, str) and shop_id.strip():
+        try:
+            select_plan_for_shop(shop_id.strip(), plan_type)
+        except HTTPException:
+            # User activation still succeeds if the shop plan write fails.
+            pass
+
     return build_plan_summary(updated)
 
 
