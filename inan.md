@@ -23,7 +23,7 @@ Authorization: Bearer <access_token>
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
 - **QR posters** (`/qr/*`) are public and rate-limited (`RATE_LIMIT_QR`, default `30/minute`). Generated in memory — nothing is stored.
-- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
+- **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `GET /fx/rates`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
 
@@ -411,6 +411,14 @@ Existing seeded/known localities skip re-geocoding.
 | `GET` | `/plans/apply/preview` | Bearer | **Viewers only.** Preview waitlist / plan application. Query: `plan_type`. |
 | `POST` | `/plans/apply` | Bearer | **Viewers only.** Join the waitlist. Body: `{ "plan_type": "premium", "shop_id": "..." }`. |
 | `GET` | `/plans/applications/me` | Bearer | Get your pending waitlist application, if any. |
+
+## FX display rates (`/fx`)
+
+Display-only conversion for plan/bucket UIs. **Payments stay INR.**
+
+| Method | Endpoint | Auth | Use |
+|--------|----------|------|-----|
+| `GET` | `/fx/rates` | Public | Rates with base `INR`. Always returns `INR`, `USD`, `EUR`, `GBP`, `AED`, `SGD` (units of quote per 1 INR). Live from Frankfurter when reachable; otherwise static fallbacks. AED is derived from the USD peg when the provider omits it. |
 
 **Waitlist aliases** (same behavior as plan apply endpoints):
 
