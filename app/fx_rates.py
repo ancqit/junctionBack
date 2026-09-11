@@ -62,13 +62,18 @@ def _with_aed(rates: dict[str, float]) -> dict[str, float]:
 def _complete_rates(partial: dict[str, float]) -> dict[str, float]:
     rates = {"INR": 1.0}
     for code in SUPPORTED_QUOTE_CURRENCIES:
-        if code == "INR":
+        if code in ("INR", "AED"):
             continue
         value = partial.get(code)
         if value is not None and float(value) > 0:
             rates[code] = float(value)
         else:
             rates[code] = FALLBACK_RATES[code]
+    # Prefer live AED when a provider returns it; otherwise derive from USD peg.
+    aed = partial.get("AED")
+    if aed is not None and float(aed) > 0:
+        rates["AED"] = float(aed)
+        return rates
     return _with_aed(rates)
 
 
