@@ -61,6 +61,15 @@ PRODUCT_CATEGORIES: list[ProductCategoryInfo] = [
     _cat("automotive", "Automotive", "Car and bike accessories", "general"),
     _cat("agriculture", "Agriculture", "Seeds, feed, and farm supplies", "general"),
     _cat("services", "Services", "Service SKUs and add-ons", "services"),
+    # Software & digital (for developers / agencies)
+    _cat("web_application", "Web application", "Web apps, portals, and SaaS UIs", "software"),
+    _cat("mobile_app", "Mobile app", "iOS, Android, and cross-platform apps", "software"),
+    _cat("saas", "SaaS", "Subscription software and cloud tools", "software"),
+    _cat("api_services", "API & integrations", "APIs, webhooks, and system integrations", "software"),
+    _cat("devops", "DevOps & hosting", "CI/CD, cloud hosting, and infrastructure", "software"),
+    _cat("ui_ux", "UI / UX design", "Product design, wireframes, and prototypes", "software"),
+    _cat("it_services", "IT services", "Support, maintenance, and consulting", "software"),
+    _cat("digital_marketing", "Digital marketing", "SEO, ads, and growth services", "software"),
     _cat("other", "Other", "Uncategorized or miscellaneous", "general"),
 ]
 
