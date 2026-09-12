@@ -16,13 +16,14 @@ Authorization: Bearer <access_token>
 ## Security
 
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
-- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **100 seconds**). Use that Bearer token for `/locations/*`, catalog **shop/product reads**, and **`POST /orders`** (place an order at any real shop). No user login required.
+- **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **900 seconds** / 15 min). Use that Bearer token for `/locations/*`, catalog **shop/product reads**, and **`POST /orders`** (place an order at any real shop). No user login required. Catalog reads are rate-limited (`RATE_LIMIT_CATALOG`).
 - **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — session/user JWT checks do.
 - **Shop-scoped writes** (and owner-app reads) require the user to own the shop (or be admin). `junction.today` session tokens are **read-only** for shops/products, except they may **create** orders via `POST /orders`.
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
 - **Guest order creates** (`POST /orders`) are rate-limited (`RATE_LIMIT_GUEST_ORDERS`, default `30/minute`).
 - **QR posters** (`/qr/*`) are public and rate-limited (`RATE_LIMIT_QR`, default `30/minute`). Generated in memory — nothing is stored.
+- **Catalog reads** (`/shops/by-city`, `/shops/by-location`, `/shops/{id}/products`, `/products/search`, …) are rate-limited (`RATE_LIMIT_CATALOG`, default `60/minute`). Guest sessions cannot dump `GET /shops` without a city/locality scope.
 - **Public (no JWT):** `/health`, `POST /session`, `/auth/register`, `/auth/login`, `/auth/otp/*`, `/auth/catalog-otp/*`, `/auth/roles`, `GET /plans`, `/terms-and-conditions`, `/auth/digilocker/callback`, `/blog/*`, `/qr/*`.
 - Set `OPENAPI_ENABLED=false` in production to hide `/docs`.
 - **Render health check:** use `GET /health` (returns `{"status":"ok"}`), not `/docs`.
@@ -87,9 +88,9 @@ Guest security when there is no user login. Intended for the **junction.today** 
    - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-city?city=`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
    - Orders (create): `POST /orders` (any real shop; rate-limited; optional `source: "junction.today"`)
-3. When the token expires (~100s), call `POST /session` again for a new one
+3. When the token expires (~900s), call `POST /session` again for a new one
 
-Optional env: `SESSION_EXPIRE_SECONDS=3600` (default 3600 / 1 hour).
+Optional env: `SESSION_EXPIRE_SECONDS=900` (default 900 / 15 minutes).
 
 Session JWTs are **not** user login tokens — they unlock guest/catalog routes and order placement. Creating or editing shops/products still requires a normal owner login JWT.
 

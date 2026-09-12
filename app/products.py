@@ -27,7 +27,7 @@ from .product_images import (
     validate_image_upload,
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
-from .rate_limit import RATE_LIMIT_AI, limiter
+from .rate_limit import RATE_LIMIT_AI, RATE_LIMIT_CATALOG, limiter
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
@@ -518,7 +518,9 @@ def _score_product_against_query(product: dict, tokens: list[str], raw_query: st
 
 
 @router.get("/search", response_model=CityProductSearchResponse)
+@limiter.limit(RATE_LIMIT_CATALOG)
 def search_city_products(
+    request: Request,
     auth: CatalogReader,
     city: str = Query(..., min_length=1, max_length=80),
     q: str = Query(..., min_length=1, max_length=120, description="Google-style product query for the city"),
