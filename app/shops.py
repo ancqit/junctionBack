@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -22,6 +22,7 @@ from .plan_service import (
     select_plan_for_shop,
 )
 from .products import Product, serialize_product
+from .rate_limit import RATE_LIMIT_CATALOG, limiter
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .shop_cleanup import delete_shop_cascade
@@ -30,6 +31,9 @@ from .shop_types import SHOP_TYPES, ShopTypeInfo
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/shops", tags=["shops"])
+
+# Guest (junction.today) page size hard cap — slows Postman city dumps.
+GUEST_CITY_SHOP_PAGE_MAX = 100
 
 _TIME_HH_MM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -396,6 +400,9 @@ def ensure_shop_indexes() -> None:
             shops.drop_index("phone_number_1")
             break
     shops.create_index("phone_number")
+    # City / locality junction catalog (case-sensitive prefix of stored values; queries use anchored regex).
+    shops.create_index([("city", 1), ("is_open", 1), ("locality", 1)])
+    shops.create_index([("city", 1), ("locality", 1)])
 
 
 def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
@@ -428,7 +435,9 @@ def list_shop_types(_: CatalogReader) -> list[ShopTypeInfo]:
 
 
 @router.get("", response_model=list[Shop])
+@limiter.limit(RATE_LIMIT_CATALOG)
 def list_shops(
+    request: Request,
     auth: CatalogReader,
     shop_id: str | None = Query(default=None, max_length=80, description="Return this shop only"),
     store_id: str | None = Query(default=None, max_length=80, description="Alias of shop_id"),
@@ -436,7 +445,8 @@ def list_shops(
     """
     List shops.
     - User JWT: owner sees own shops; admin sees all.
-    - junction.today session JWT: public catalog of all shops.
+    - junction.today session JWT: single shop by id, or use /shops/by-city and /shops/by-location
+      (full platform dump is not allowed for guest sessions).
     - Optional shop_id/store_id query returns that one shop.
     Shop JSON includes show_phone (boolean switch) and phone_number (never nulled by the switch).
     """
@@ -455,8 +465,10 @@ def list_shops(
         return serialize_shops([document])
 
     if is_junction_session(auth):
-        documents = shops.find({}).sort("created_at", -1)
-        return serialize_shops(list(documents))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use /shops/by-city or /shops/by-location for guest catalog reads",
+        )
 
     current_user = auth["user"]
     role = get_user_role(current_user)
@@ -489,7 +501,9 @@ def get_shops_by_name(
 
 
 @router.get("/by-location", response_model=list[Shop])
+@limiter.limit(RATE_LIMIT_CATALOG)
 def list_shops_by_location(
+    request: Request,
     auth: CatalogReader,
     city: str = Query(..., min_length=1, max_length=80),
     locality: str = Query(..., min_length=1, max_length=120),
@@ -516,7 +530,52 @@ def list_shops_by_location(
         if role != UserRole.admin:
             query["owner_user_id"] = str(current_user["_id"])
 
-    documents = shops.find(query).sort("created_at", -1)
+    documents = shops.find(query).sort([("locality", 1), ("name", 1), ("created_at", -1)])
+    return serialize_shops(documents)
+
+
+@router.get("/by-city", response_model=list[Shop])
+@limiter.limit(RATE_LIMIT_CATALOG)
+def list_shops_by_city(
+    request: Request,
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    open_only: bool = Query(default=True, description="When true, only return shops with is_open=true"),
+    limit: int = Query(default=60, ge=1, le=2000, description="Max shops to return for the city"),
+    offset: int = Query(default=0, ge=0, description="Skip N shops (pagination)"),
+) -> list[Shop]:
+    """
+    City junction catalog: shops in one city only (not the full platform).
+
+    Prefer this over GET /shops for junction.today city scope so clients do not
+    download every shop nationwide and filter in the browser.
+    Guest sessions are capped at GUEST_CITY_SHOP_PAGE_MAX per request.
+    """
+    city_name = city.strip()
+    if not city_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city is required")
+
+    page_limit = limit
+    if is_junction_session(auth):
+        page_limit = min(limit, GUEST_CITY_SHOP_PAGE_MAX)
+
+    query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+    }
+    if open_only:
+        query["is_open"] = True
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            query["owner_user_id"] = str(current_user["_id"])
+
+    documents = (
+        shops.find(query)
+        .sort([("locality", 1), ("name", 1), ("created_at", -1)])
+        .skip(offset)
+        .limit(page_limit)
+    )
     return serialize_shops(documents)
 
 
@@ -606,7 +665,8 @@ def get_shop(shop_id: str, auth: CatalogReader) -> Shop:
 
 
 @router.get("/{shop_id}/products", response_model=list[Product])
-def list_products_for_shop(shop_id: str, auth: CatalogReader) -> list[Product]:
+@limiter.limit(RATE_LIMIT_CATALOG)
+def list_products_for_shop(request: Request, shop_id: str, auth: CatalogReader) -> list[Product]:
     """
     List products for one shop.
     Flow for junction.today: /shops/by-location → select shop → /shops/{shop_id}/products.

@@ -27,7 +27,7 @@ from .product_images import (
     validate_image_upload,
 )
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
-from .rate_limit import RATE_LIMIT_AI, limiter
+from .rate_limit import RATE_LIMIT_AI, RATE_LIMIT_CATALOG, limiter
 from .roles import UserRole, get_user_role
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
@@ -458,6 +458,7 @@ class CityShopMatch(BaseModel):
 class CityProductSearchResponse(BaseModel):
     query: str
     city: str
+    locality: str | None = None
     total_shops: int
     shops: list[CityShopMatch]
 
@@ -518,40 +519,81 @@ def _score_product_against_query(product: dict, tokens: list[str], raw_query: st
 
 
 @router.get("/search", response_model=CityProductSearchResponse)
+@limiter.limit(RATE_LIMIT_CATALOG)
 def search_city_products(
+    request: Request,
     auth: CatalogReader,
     city: str = Query(..., min_length=1, max_length=80),
-    q: str = Query(..., min_length=1, max_length=120, description="Google-style product query for the city"),
+    q: str = Query(..., min_length=1, max_length=120, description="Google-style product query"),
+    locality: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description="Optional locality scope (junction.today locality card)",
+    ),
     limit: int = Query(default=40, ge=1, le=80),
 ) -> CityProductSearchResponse:
     """
-    City-junction product search: free-text `q` → shops in that city that list matching products.
+    Product search for city or locality junction: free-text `q` → matching shops.
 
     Outlook is a simple search bar; retrieval scores name/tags/category/description
     (and lightly shop name) so results feel Google-like. Session JWT or user JWT.
+    Pass `locality` to restrict to one neighbourhood.
     """
     city_name = city.strip()
     query_text = q.strip()
+    locality_name = locality.strip() if locality else ""
     if not city_name or not query_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city and q are required")
 
     tokens = _tokenize_search_query(query_text)
     if not tokens and len(query_text) < 2:
-        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+        return CityProductSearchResponse(
+            query=query_text,
+            city=city_name,
+            locality=locality_name or None,
+            total_shops=0,
+            shops=[],
+        )
 
     shop_query: dict = {
         "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
         "is_open": True,
     }
+    if locality_name:
+        shop_query["locality"] = {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"}
     if not is_junction_session(auth):
         current_user = auth["user"]
         role = get_user_role(current_user)
         if role != UserRole.admin:
             shop_query["owner_user_id"] = str(current_user["_id"])
 
-    city_shops = list(shops.find(shop_query))
+    # Lean projection — search only needs identity + display fields, not full shop docs.
+    shop_projection = {
+        "name": 1,
+        "city": 1,
+        "locality": 1,
+        "address": 1,
+        "open_time": 1,
+        "closed_time": 1,
+        "is_open": 1,
+        "show_phone": 1,
+        "phone_number": 1,
+        "shop_type": 1,
+        "avatar_url": 1,
+        "digilocker_verified": 1,
+        "gst_verified": 1,
+        "currency": 1,
+    }
+    city_shops = list(shops.find(shop_query, shop_projection))
     if not city_shops:
-        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+        return CityProductSearchResponse(
+            query=query_text,
+            city=city_name,
+            locality=locality_name or None,
+            total_shops=0,
+            shops=[],
+        )
 
     shop_by_id = {str(document["_id"]): document for document in city_shops}
     store_ids = list(shop_by_id.keys())
@@ -574,7 +616,12 @@ def search_city_products(
         "status": {"$ne": ProductStatus.discontinued.value},
         "$or": or_clauses,
     }
-    candidates = list(products.find(product_query).limit(500))
+    candidates = list(
+        products.find(
+            product_query,
+            {"name": 1, "category": 1, "tags": 1, "description": 1, "store_id": 1, "status": 1, "stock_quantity": 1},
+        ).limit(500)
+    )
 
     shop_hits: dict[str, dict] = {}
     for product in candidates:
@@ -601,17 +648,16 @@ def search_city_products(
         )
         bucket["score"] = max(bucket["score"], score)
 
-    # Light shop-name graph hop: shops whose name matches even without product hits.
-    raw_lower = query_text.lower()
-    for store_id, shop_doc in shop_by_id.items():
-        shop_name = str(shop_doc.get("name") or "").lower()
-        if raw_lower in shop_name or any(token in shop_name for token in tokens):
-            bucket = shop_hits.setdefault(
-                store_id,
-                {"shop": shop_doc, "matches": [], "score": 0.0},
-            )
-            shop_boost = 2.5
-            bucket["score"] = max(bucket["score"], shop_boost)
+    # Light shop-name hop: query matching shop names in-city instead of scanning every shop in Python.
+    name_or = [{"name": {"$regex": re.escape(token), "$options": "i"}} for token in (tokens or [query_text.lower()])]
+    name_or.append({"name": {"$regex": re.escape(query_text), "$options": "i"}})
+    for shop_doc in shops.find({**shop_query, "$or": name_or}, shop_projection).limit(40):
+        store_id = str(shop_doc["_id"])
+        bucket = shop_hits.setdefault(
+            store_id,
+            {"shop": shop_doc, "matches": [], "score": 0.0},
+        )
+        bucket["score"] = max(bucket["score"], 2.5)
 
     ranked = sorted(shop_hits.values(), key=lambda row: (-row["score"], str(row["shop"].get("name") or "")))
     results: list[CityShopMatch] = []
@@ -658,6 +704,7 @@ def search_city_products(
     return CityProductSearchResponse(
         query=query_text,
         city=city_name,
+        locality=locality_name or None,
         total_shops=len(results),
         shops=results,
     )
