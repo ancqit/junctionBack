@@ -458,6 +458,7 @@ class CityShopMatch(BaseModel):
 class CityProductSearchResponse(BaseModel):
     query: str
     city: str
+    locality: str | None = None
     total_shops: int
     shops: list[CityShopMatch]
 
@@ -523,28 +524,44 @@ def search_city_products(
     request: Request,
     auth: CatalogReader,
     city: str = Query(..., min_length=1, max_length=80),
-    q: str = Query(..., min_length=1, max_length=120, description="Google-style product query for the city"),
+    q: str = Query(..., min_length=1, max_length=120, description="Google-style product query"),
+    locality: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description="Optional locality scope (junction.today locality card)",
+    ),
     limit: int = Query(default=40, ge=1, le=80),
 ) -> CityProductSearchResponse:
     """
-    City-junction product search: free-text `q` → shops in that city that list matching products.
+    Product search for city or locality junction: free-text `q` → matching shops.
 
     Outlook is a simple search bar; retrieval scores name/tags/category/description
     (and lightly shop name) so results feel Google-like. Session JWT or user JWT.
+    Pass `locality` to restrict to one neighbourhood.
     """
     city_name = city.strip()
     query_text = q.strip()
+    locality_name = locality.strip() if locality else ""
     if not city_name or not query_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city and q are required")
 
     tokens = _tokenize_search_query(query_text)
     if not tokens and len(query_text) < 2:
-        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+        return CityProductSearchResponse(
+            query=query_text,
+            city=city_name,
+            locality=locality_name or None,
+            total_shops=0,
+            shops=[],
+        )
 
     shop_query: dict = {
         "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
         "is_open": True,
     }
+    if locality_name:
+        shop_query["locality"] = {"$regex": f"^{re.escape(locality_name)}$", "$options": "i"}
     if not is_junction_session(auth):
         current_user = auth["user"]
         role = get_user_role(current_user)
@@ -570,7 +587,13 @@ def search_city_products(
     }
     city_shops = list(shops.find(shop_query, shop_projection))
     if not city_shops:
-        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+        return CityProductSearchResponse(
+            query=query_text,
+            city=city_name,
+            locality=locality_name or None,
+            total_shops=0,
+            shops=[],
+        )
 
     shop_by_id = {str(document["_id"]): document for document in city_shops}
     store_ids = list(shop_by_id.keys())
@@ -681,6 +704,7 @@ def search_city_products(
     return CityProductSearchResponse(
         query=query_text,
         city=city_name,
+        locality=locality_name or None,
         total_shops=len(results),
         shops=results,
     )
