@@ -18,8 +18,9 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
-from .database import gst_sessions, users
+from .database import gst_sessions, shops, users
 from .login import get_current_user
+from .access_control import ensure_shop_access, get_shop_by_store_id
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter(prefix="/gst", tags=["gst"])
@@ -40,6 +41,8 @@ class GstVerifyRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=80)
     gstin: str = Field(min_length=15, max_length=15)
     captcha: str = Field(min_length=1, max_length=12)
+    shop_id: str | None = Field(default=None, max_length=80)
+    store_id: str | None = Field(default=None, max_length=80, description="Alias of shop_id")
 
     @field_validator("gstin")
     @classmethod
@@ -57,6 +60,14 @@ class GstVerifyRequest(BaseModel):
             raise ValueError("captcha is required")
         return trimmed
 
+    @field_validator("shop_id", "store_id")
+    @classmethod
+    def strip_optional_ids(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
+
 
 class GstVerifyResponse(BaseModel):
     gstin: str
@@ -66,6 +77,7 @@ class GstVerifyResponse(BaseModel):
     status: str | None = None
     taxpayer_type: str | None = None
     message: str
+    shop_id: str | None = None
 
 
 def _cookie_jar_from_list(items: list[dict]) -> httpx.Cookies:
@@ -173,21 +185,27 @@ def verify_gstin(
         )
 
     now = datetime.now(timezone.utc)
-    users.update_one(
-        {"_id": current_user["_id"]},
-        {
-            "$set": {
-                "gstin": returned_gstin,
-                "gst_verified": True,
-                "gst_legal_name": legal_name,
-                "gst_trade_name": trade_name,
-                "gst_status": gst_status,
-                "gst_taxpayer_type": taxpayer_type,
-                "gst_verified_at": now,
-                "updated_at": now,
-            }
-        },
-    )
+    gst_set = {
+        "gstin": returned_gstin,
+        "gst_verified": True,
+        "gst_legal_name": legal_name,
+        "gst_trade_name": trade_name,
+        "gst_status": gst_status,
+        "gst_taxpayer_type": taxpayer_type,
+        "gst_verified_at": now,
+        "updated_at": now,
+    }
+
+    resolved_shop_id = payload.shop_id or payload.store_id
+    shop_id_out: str | None = None
+    if resolved_shop_id:
+        shop = get_shop_by_store_id(resolved_shop_id)
+        ensure_shop_access(current_user, shop)
+        shops.update_one({"_id": shop["_id"]}, {"$set": gst_set})
+        shop_id_out = str(shop["_id"])
+    else:
+        # Legacy: no shop_id → keep writing on the user.
+        users.update_one({"_id": current_user["_id"]}, {"$set": gst_set})
 
     return GstVerifyResponse(
         gstin=returned_gstin,
@@ -197,4 +215,5 @@ def verify_gstin(
         status=gst_status,
         taxpayer_type=taxpayer_type,
         message="GSTIN verified from the public GST portal",
+        shop_id=shop_id_out,
     )

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_vali
 from pymongo import ReturnDocument
 
 from .database import database, notices, shops, users
-from .access_control import ensure_shop_access, resolve_store_id
+from .access_control import ensure_shop_access, get_shop_by_store_id, resolve_store_id
 from .login import get_current_user
 from .product_images import validate_image_upload
 from .utils import parse_object_id
@@ -19,6 +19,7 @@ notices_router = APIRouter(prefix="/notices", tags=["notices"])
 
 profile_avatar_fs = GridFS(database, collection="profile_avatars")
 
+# Shop-owned profile fields (per active shop). Account identity stays on the user.
 
 class Profile(BaseModel):
     id: str
@@ -34,6 +35,8 @@ class Profile(BaseModel):
     gst_legal_name: str | None = None
     gst_trade_name: str | None = None
     gst_status: str | None = None
+    # Present when profile is scoped to an active shop.
+    shop_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -54,38 +57,132 @@ class ProfileUpdate(BaseModel):
         return value
 
 
-def serialize_profile(user: dict) -> Profile:
+def resolve_profile_shop(user: dict, shop_id: str | None) -> dict | None:
+    """Load shop for profile when shop_id is provided; None keeps legacy user profile."""
+    resolved = (shop_id or "").strip()
+    if not resolved:
+        return None
+    shop = get_shop_by_store_id(resolved)
+    ensure_shop_access(user, shop)
+    return shop
+
+
+def _pick_profile_value(shop: dict | None, user: dict, key: str, default=None):
+    """Prefer shop-stored value when the key was set on the shop; else owner (legacy)."""
+    if shop is not None and key in shop and shop.get(key) is not None:
+        return shop.get(key)
+    return user.get(key, default)
+
+
+def _strip_optional(value) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def serialize_profile(user: dict, shop: dict | None = None) -> Profile:
+    shop_id = str(shop["_id"]) if shop is not None else None
+
+    # Soft content: prefer shop, fall back to owner for older records.
+    bio = _strip_optional(_pick_profile_value(shop, user, "bio"))
+    avatar_url = _strip_optional(_pick_profile_value(shop, user, "avatar_url"))
+
+    # Verification is per shop when shop_id is present — do not inherit from the phone/user.
+    if shop is not None:
+        digilocker_verified = bool(shop.get("digilocker_verified", False))
+        digilocker_name = _strip_optional(shop.get("digilocker_name"))
+        gst_verified = bool(shop.get("gst_verified", False))
+        gstin = _strip_optional(shop.get("gstin"))
+        gst_legal_name = _strip_optional(shop.get("gst_legal_name"))
+        gst_trade_name = _strip_optional(shop.get("gst_trade_name"))
+        gst_status = _strip_optional(shop.get("gst_status"))
+        updated_at = shop.get("updated_at") or user["updated_at"]
+    else:
+        digilocker_verified = bool(user.get("digilocker_verified", False))
+        digilocker_name = _strip_optional(user.get("digilocker_name"))
+        gst_verified = bool(user.get("gst_verified", False))
+        gstin = _strip_optional(user.get("gstin"))
+        gst_legal_name = _strip_optional(user.get("gst_legal_name"))
+        gst_trade_name = _strip_optional(user.get("gst_trade_name"))
+        gst_status = _strip_optional(user.get("gst_status"))
+        updated_at = user["updated_at"]
+
     return Profile(
         id=str(user["_id"]),
         email=user.get("email"),
         phone_number=user.get("phone_number"),
         display_name=user["display_name"],
-        bio=user.get("bio"),
-        avatar_url=user.get("avatar_url"),
-        digilocker_verified=bool(user.get("digilocker_verified", False)),
-        digilocker_name=user.get("digilocker_name"),
-        gstin=user.get("gstin"),
-        gst_verified=bool(user.get("gst_verified", False)),
-        gst_legal_name=user.get("gst_legal_name"),
-        gst_trade_name=user.get("gst_trade_name"),
-        gst_status=user.get("gst_status"),
+        bio=bio,
+        avatar_url=avatar_url,
+        digilocker_verified=digilocker_verified,
+        digilocker_name=digilocker_name,
+        gstin=gstin,
+        gst_verified=gst_verified,
+        gst_legal_name=gst_legal_name,
+        gst_trade_name=gst_trade_name,
+        gst_status=gst_status,
+        shop_id=shop_id,
         created_at=user["created_at"],
-        updated_at=user["updated_at"],
+        updated_at=updated_at,
     )
 
 
 @router.get("", response_model=Profile)
-def read_profile(current_user: Annotated[dict, Depends(get_current_user)]) -> Profile:
-    return serialize_profile(current_user)
+def read_profile(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    shop_id: Annotated[str | None, Query(max_length=80)] = None,
+    store_id: Annotated[str | None, Query(max_length=80, description="Alias of shop_id")] = None,
+) -> Profile:
+    shop = resolve_profile_shop(current_user, shop_id or store_id)
+    return serialize_profile(current_user, shop)
 
 
 @router.patch("", response_model=Profile)
-def update_profile(payload: ProfileUpdate, current_user: Annotated[dict, Depends(get_current_user)]) -> Profile:
+def update_profile(
+    payload: ProfileUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    shop_id: Annotated[str | None, Query(max_length=80)] = None,
+    store_id: Annotated[str | None, Query(max_length=80, description="Alias of shop_id")] = None,
+) -> Profile:
     changes = payload.model_dump(exclude_unset=True, mode="json")
     if not changes:
         raise HTTPException(status_code=400, detail="Provide at least one profile field")
-    changes["updated_at"] = datetime.now(timezone.utc)
-    user = users.find_one_and_update({"_id": current_user["_id"]}, {"$set": changes}, return_document=ReturnDocument.AFTER)
+
+    shop = resolve_profile_shop(current_user, shop_id or store_id)
+    now = datetime.now(timezone.utc)
+    user = current_user
+
+    # Account display name stays on the user (login identity).
+    account_changes: dict = {}
+    if "display_name" in changes:
+        account_changes["display_name"] = changes.pop("display_name")
+    if account_changes:
+        account_changes["updated_at"] = now
+        user = users.find_one_and_update(
+            {"_id": current_user["_id"]},
+            {"$set": account_changes},
+            return_document=ReturnDocument.AFTER,
+        )
+
+    if shop is not None:
+        shop_changes = {key: value for key, value in changes.items() if key in ("bio", "avatar_url")}
+        if shop_changes:
+            shop_changes["updated_at"] = now
+            shop = shops.find_one_and_update(
+                {"_id": shop["_id"]},
+                {"$set": shop_changes},
+                return_document=ReturnDocument.AFTER,
+            )
+        return serialize_profile(user, shop)
+
+    # Legacy: no shop_id → keep writing shop fields on the user document.
+    if changes:
+        changes["updated_at"] = now
+        user = users.find_one_and_update(
+            {"_id": current_user["_id"]},
+            {"$set": changes},
+            return_document=ReturnDocument.AFTER,
+        )
     return serialize_profile(user)
 
 
@@ -94,27 +191,43 @@ async def upload_profile_avatar(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     file: UploadFile = File(...),
+    shop_id: Annotated[str | None, Query(max_length=80)] = None,
+    store_id: Annotated[str | None, Query(max_length=80, description="Alias of shop_id")] = None,
 ) -> Profile:
-    """Upload a shop/profile photo from device. Stores in GridFS and sets avatar_url."""
+    """Upload a shop profile photo. With shop_id, stores on the shop; else on the user (legacy)."""
     contents = await file.read()
     content_type = validate_image_upload(file, contents)
+    shop = resolve_profile_shop(current_user, shop_id or store_id)
     file_id = profile_avatar_fs.put(
         contents,
         content_type=content_type,
         filename=file.filename or "avatar.jpg",
-        metadata={"user_id": str(current_user["_id"]), "source": "upload"},
+        metadata={
+            "user_id": str(current_user["_id"]),
+            "shop_id": str(shop["_id"]) if shop is not None else None,
+            "source": "upload",
+        },
     )
     base = str(request.base_url).rstrip("/")
     avatar_url = f"{base}/profile/avatar/file/{file_id}"
+    now = datetime.now(timezone.utc)
+    avatar_set = {
+        "avatar_url": avatar_url,
+        "avatar_stored_image_id": str(file_id),
+        "updated_at": now,
+    }
+
+    if shop is not None:
+        shop = shops.find_one_and_update(
+            {"_id": shop["_id"]},
+            {"$set": avatar_set},
+            return_document=ReturnDocument.AFTER,
+        )
+        return serialize_profile(current_user, shop)
+
     user = users.find_one_and_update(
         {"_id": current_user["_id"]},
-        {
-            "$set": {
-                "avatar_url": avatar_url,
-                "avatar_stored_image_id": str(file_id),
-                "updated_at": datetime.now(timezone.utc),
-            }
-        },
+        {"$set": avatar_set},
         return_document=ReturnDocument.AFTER,
     )
     return serialize_profile(user)

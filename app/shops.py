@@ -241,9 +241,9 @@ class Shop(BaseModel):
     shop_type_label: str | None = None
     owner_bio: str | None = None
     avatar_url: str | None = None
-    # Owner DigiLocker / gov-ID verification (from users collection).
+    # Owner DigiLocker / gov-ID verification (shop-scoped; owner fallback for legacy).
     digilocker_verified: bool = False
-    # Owner GSTIN verification via public GST portal (from users collection).
+    # GSTIN verification via public GST portal (shop-scoped; owner fallback for legacy).
     gst_verified: bool = False
     # Viewer mode: manual owner toggle or automatic when plan expires.
     is_locked: bool = False
@@ -297,12 +297,21 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
     if not (isinstance(shop_type_raw, str) and shop_type_raw.strip()) and owner and owner.get("shop_type"):
         shop_type_raw = owner.get("shop_type")
     shop_type = shop_type_raw.strip() if isinstance(shop_type_raw, str) and shop_type_raw.strip() else None
-    owner_bio = owner.get("bio") if owner else None
+
+    # Soft content can fall back to owner; DigiLocker/GST are shop-only (no phone inheritance).
+    def _pick_soft(key: str, default=None):
+        if key in document and document.get(key) is not None:
+            return document.get(key)
+        if owner:
+            return owner.get(key, default)
+        return default
+
+    owner_bio = _pick_soft("bio")
     if isinstance(owner_bio, str):
         owner_bio = owner_bio.strip() or None
     else:
         owner_bio = None
-    avatar_url = owner.get("avatar_url") if owner else None
+    avatar_url = _pick_soft("avatar_url")
     if isinstance(avatar_url, str):
         avatar_url = avatar_url.strip() or None
     else:
@@ -330,8 +339,8 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         shop_type_label=_shop_type_label(shop_type),
         owner_bio=owner_bio,
         avatar_url=avatar_url,
-        digilocker_verified=bool(owner.get("digilocker_verified")) if owner else False,
-        gst_verified=bool(owner.get("gst_verified")) if owner else False,
+        digilocker_verified=bool(document.get("digilocker_verified", False)),
+        gst_verified=bool(document.get("gst_verified", False)),
         is_locked=bool(document.get("is_locked", False)),
         lock_reason=_normalize_lock_reason(document.get("lock_reason"), bool(document.get("is_locked", False))),
         plan=plan_summary,
