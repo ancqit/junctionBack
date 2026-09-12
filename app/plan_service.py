@@ -155,6 +155,88 @@ def default_plan_document() -> dict:
     }
 
 
+def viewer_shop_plan_document() -> dict:
+    """Shop created after the number's trial — profile-only / expired (viewer mode)."""
+    now = utc_now()
+    return {
+        "type": PlanType.free_trial.value,
+        "status": PlanStatus.expired.value,
+        "started_at": now,
+        "ends_at": now,
+        "trial_used": True,
+        "viewing_applied": True,
+        "selected_plan_type": None,
+        "activated_by": None,
+    }
+
+
+def user_has_active_number_trial(user: dict) -> bool:
+    """Trial is attached to the phone/user — one trial window for the number."""
+    if get_user_role(user) == UserRole.admin:
+        return False
+    plan = user.get("plan") or {}
+    if plan.get("viewing_applied"):
+        return False
+    if plan.get("type") != PlanType.free_trial.value:
+        return False
+    if plan.get("status") != PlanStatus.active.value:
+        return False
+    ends_at = plan.get("ends_at")
+    if ends_at is None:
+        return True
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    return utc_now() < ends_at
+
+
+def plan_document_for_new_shop(owner: dict) -> tuple[dict, bool, str | None]:
+    """
+    New shop plan rules (anti-outsmart):
+    - While the number's free trial is active → shop shares that trial window.
+    - After trial ends → shop is viewer mode (locked, expired plan) even if another
+      owned shop already has a paid plan.
+    """
+    if get_user_role(owner) == UserRole.admin:
+        return default_plan_document(), False, None
+
+    if user_has_active_number_trial(owner):
+        plan = owner.get("plan") or {}
+        doc = default_plan_document()
+        if plan.get("ends_at") is not None:
+            doc["ends_at"] = plan["ends_at"]
+        if plan.get("started_at") is not None:
+            doc["started_at"] = plan["started_at"]
+        return doc, False, None
+
+    return viewer_shop_plan_document(), True, "plan_expired"
+
+
+def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
+    """Lock owned shops that are not on an active/grace paid plan (viewer mode)."""
+    now = utc_now()
+    for shop in shops.find({"owner_user_id": str(owner_user_id)}):
+        plan = shop.get("plan") or {}
+        status_value = plan.get("status")
+        if is_paid_plan(plan.get("type")) and status_value in {
+            PlanStatus.active.value,
+            PlanStatus.grace_period.value,
+        }:
+            continue
+        shops.update_one(
+            {"_id": shop["_id"]},
+            {
+                "$set": {
+                    "is_locked": True,
+                    "lock_reason": "plan_expired",
+                    "plan.status": PlanStatus.expired.value,
+                    "plan.viewing_applied": True,
+                    "plan.trial_used": True,
+                    "updated_at": now,
+                }
+            },
+        )
+
+
 def is_paid_plan(plan_type: str | None) -> bool:
     return plan_type in {
         PlanType.serious.value,
@@ -239,7 +321,10 @@ def downgrade_owner_to_viewer(user: dict) -> dict:
         },
         return_document=ReturnDocument.AFTER,
     )
-    return updated or user
+    result = updated or user
+    # Number trial over → shops without their own paid plan go to viewer mode.
+    lock_non_active_shops_for_owner(str(result["_id"]))
+    return result
 
 
 def expire_paid_plan_if_needed(user: dict) -> dict:
@@ -700,6 +785,9 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
             "$set": {
                 "plan.status": PlanStatus.expired.value,
                 "plan.expired_at": utc_now(),
+                "plan.viewing_applied": True,
+                "is_locked": True,
+                "lock_reason": "plan_expired",
                 "updated_at": utc_now(),
             }
         },
@@ -758,6 +846,9 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
         {
             "$set": {
                 "plan.status": PlanStatus.expired.value,
+                "plan.viewing_applied": True,
+                "is_locked": True,
+                "lock_reason": "plan_expired",
                 "updated_at": utc_now(),
             }
         },
@@ -864,9 +955,29 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
     }
     updated = shops.find_one_and_update(
         {"_id": shop["_id"]},
-        {"$set": {"plan": plan_document, "updated_at": now}},
+        {
+            "$set": {
+                "plan": plan_document,
+                "is_locked": False,
+                "lock_reason": None,
+                "updated_at": now,
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
+    # Selecting a plan for this shop does not unlock sibling shops.
+    owner_id = str((updated or shop).get("owner_user_id") or "")
+    if owner_id:
+        users.update_one(
+            {"_id": parse_object_id(owner_id, "User")},
+            {
+                "$set": {
+                    "role": UserRole.owner.value,
+                    "plan.viewing_applied": False,
+                    "updated_at": now,
+                }
+            },
+        )
     return build_shop_plan_summary(updated or shop)
 
 
