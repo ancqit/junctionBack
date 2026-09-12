@@ -396,6 +396,9 @@ def ensure_shop_indexes() -> None:
             shops.drop_index("phone_number_1")
             break
     shops.create_index("phone_number")
+    # City / locality junction catalog (case-sensitive prefix of stored values; queries use anchored regex).
+    shops.create_index([("city", 1), ("is_open", 1), ("locality", 1)])
+    shops.create_index([("city", 1), ("locality", 1)])
 
 
 def find_owned_shop_by_name(user: dict, shop_name: str) -> dict:
@@ -516,7 +519,45 @@ def list_shops_by_location(
         if role != UserRole.admin:
             query["owner_user_id"] = str(current_user["_id"])
 
-    documents = shops.find(query).sort("created_at", -1)
+    documents = shops.find(query).sort([("locality", 1), ("name", 1), ("created_at", -1)])
+    return serialize_shops(documents)
+
+
+@router.get("/by-city", response_model=list[Shop])
+def list_shops_by_city(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    open_only: bool = Query(default=True, description="When true, only return shops with is_open=true"),
+    limit: int = Query(default=1000, ge=1, le=2000, description="Max shops to return for the city"),
+    offset: int = Query(default=0, ge=0, description="Skip N shops (pagination)"),
+) -> list[Shop]:
+    """
+    City junction catalog: shops in one city only (not the full platform).
+
+    Prefer this over GET /shops for junction.today city scope so clients do not
+    download every shop nationwide and filter in the browser.
+    """
+    city_name = city.strip()
+    if not city_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city is required")
+
+    query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+    }
+    if open_only:
+        query["is_open"] = True
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            query["owner_user_id"] = str(current_user["_id"])
+
+    documents = (
+        shops.find(query)
+        .sort([("locality", 1), ("name", 1), ("created_at", -1)])
+        .skip(offset)
+        .limit(limit)
+    )
     return serialize_shops(documents)
 
 

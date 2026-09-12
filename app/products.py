@@ -549,7 +549,24 @@ def search_city_products(
         if role != UserRole.admin:
             shop_query["owner_user_id"] = str(current_user["_id"])
 
-    city_shops = list(shops.find(shop_query))
+    # Lean projection — search only needs identity + display fields, not full shop docs.
+    shop_projection = {
+        "name": 1,
+        "city": 1,
+        "locality": 1,
+        "address": 1,
+        "open_time": 1,
+        "closed_time": 1,
+        "is_open": 1,
+        "show_phone": 1,
+        "phone_number": 1,
+        "shop_type": 1,
+        "avatar_url": 1,
+        "digilocker_verified": 1,
+        "gst_verified": 1,
+        "currency": 1,
+    }
+    city_shops = list(shops.find(shop_query, shop_projection))
     if not city_shops:
         return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
 
@@ -574,7 +591,12 @@ def search_city_products(
         "status": {"$ne": ProductStatus.discontinued.value},
         "$or": or_clauses,
     }
-    candidates = list(products.find(product_query).limit(500))
+    candidates = list(
+        products.find(
+            product_query,
+            {"name": 1, "category": 1, "tags": 1, "description": 1, "store_id": 1, "status": 1, "stock_quantity": 1},
+        ).limit(500)
+    )
 
     shop_hits: dict[str, dict] = {}
     for product in candidates:
@@ -601,17 +623,16 @@ def search_city_products(
         )
         bucket["score"] = max(bucket["score"], score)
 
-    # Light shop-name graph hop: shops whose name matches even without product hits.
-    raw_lower = query_text.lower()
-    for store_id, shop_doc in shop_by_id.items():
-        shop_name = str(shop_doc.get("name") or "").lower()
-        if raw_lower in shop_name or any(token in shop_name for token in tokens):
-            bucket = shop_hits.setdefault(
-                store_id,
-                {"shop": shop_doc, "matches": [], "score": 0.0},
-            )
-            shop_boost = 2.5
-            bucket["score"] = max(bucket["score"], shop_boost)
+    # Light shop-name hop: query matching shop names in-city instead of scanning every shop in Python.
+    name_or = [{"name": {"$regex": re.escape(token), "$options": "i"}} for token in (tokens or [query_text.lower()])]
+    name_or.append({"name": {"$regex": re.escape(query_text), "$options": "i"}})
+    for shop_doc in shops.find({**shop_query, "$or": name_or}, shop_projection).limit(40):
+        store_id = str(shop_doc["_id"])
+        bucket = shop_hits.setdefault(
+            store_id,
+            {"shop": shop_doc, "matches": [], "score": 0.0},
+        )
+        bucket["score"] = max(bucket["score"], 2.5)
 
     ranked = sorted(shop_hits.values(), key=lambda row: (-row["score"], str(row["shop"].get("name") or "")))
     results: list[CityShopMatch] = []

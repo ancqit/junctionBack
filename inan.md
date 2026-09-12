@@ -84,12 +84,12 @@ Guest security when there is no user login. Intended for the **junction.today** 
 2. Call APIs with `Authorization: Bearer <access_token>`:
    - Locations: `/locations/cities`, `/locations/localities`, `/locations/add-junction`
    - Shop names + phone switch: `/session/shops`, `/session/shops/{id}` (see below)
-   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
+   - Shops (read): `/shops`, `/shops/{id}`, `/shops/by-name/{name}`, `/shops/by-city?city=`, `/shops/by-location?city=&locality=`, `/shops/{id}/products`, `/shops/types`
    - Products (read): `/products`, `/products/{id}`, `/products/by-location?city=&locality=`, `/products/images/{stored_image_id}`
    - Orders (create): `POST /orders` (any real shop; rate-limited; optional `source: "junction.today"`)
 3. When the token expires (~100s), call `POST /session` again for a new one
 
-Optional env: `SESSION_EXPIRE_SECONDS=100` (default 100).
+Optional env: `SESSION_EXPIRE_SECONDS=3600` (default 3600 / 1 hour).
 
 Session JWTs are **not** user login tokens — they unlock guest/catalog routes and order placement. Creating or editing shops/products still requires a normal owner login JWT.
 
@@ -239,6 +239,7 @@ New shops start on **Free Trial** (no payment). Paid plans activate only after p
 | `POST` | `/shops/{shop_id}/plan/purchase` | Bearer (user) | Start a paid plan purchase. Body: `{ "plan_type": "starter" }`. Returns **pending** payment; plan activates only after `POST /payments/{id}/complete`. |
 | `POST` | `/shops/{shop_id}/plan/select` | Bearer (user) | Alias of `plan/purchase` (pending payment). Admins activate immediately. |
 | `GET` | `/shops/by-name/{shop_name}` | Bearer (user **or** session) | Find shop(s) by name (case-insensitive). |
+| `GET` | `/shops/by-city` | Bearer (user **or** session) | City junction catalog. Query: `city` (required), `open_only` (default true), `limit` (default 1000, max 2000), `offset`. Prefer over full `GET /shops` for junction.today city scope. |
 | `GET` | `/shops/by-location` | Bearer (user **or** session) | List shops for a location. Query: `city`, `locality` (both required). For `junction.today` session: public catalog in that city/locality. |
 | `POST` | `/shops` | Bearer (user) | Create another shop for the logged-in phone. Starts on Free Trial (40 products / 15 days). Name must be unique **per mobile number**. Phone is taken from the logged-in user. |
 | `PUT` | `/shops/{shop_id}` | Bearer (user) | Update shop `name`, `city`, `locality`, `open_time`, `closed_time`, `is_open`, and/or `show_phone`. |

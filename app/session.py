@@ -1,4 +1,4 @@
-"""Short-lived guest sessions for junction.today (no user login)."""
+"""Guest sessions for junction.today (no user login). Default TTL 1 hour."""
 
 import os
 import re
@@ -18,7 +18,7 @@ from .utils import parse_object_id
 
 router = APIRouter(prefix="/session", tags=["session"])
 
-SESSION_EXPIRE_SECONDS = int(os.getenv("SESSION_EXPIRE_SECONDS", "100"))
+SESSION_EXPIRE_SECONDS = int(os.getenv("SESSION_EXPIRE_SECONDS", "3600"))
 SESSION_AUDIENCE = "junction.today"
 SESSION_TOKEN_TYPE = "junction_session"
 
@@ -183,7 +183,7 @@ def is_junction_session(auth: dict) -> bool:
 def create_session(request: Request) -> SessionResponse:
     """
     Issue a guest session for junction.today.
-    Returns session_id + JWT valid for SESSION_EXPIRE_SECONDS (default 100).
+    Returns session_id + JWT valid for SESSION_EXPIRE_SECONDS (default 3600).
     """
     _ensure_session_ttl_index()
     now = datetime.now(timezone.utc)
