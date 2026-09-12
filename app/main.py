@@ -40,6 +40,7 @@ from .fx_rates import router as fx_rates_router
 from .blog import router as blog_router
 from .blog_auth import router as blog_auth_router
 from .gst import router as gst_router
+from .health import router as health_router
 from .qr import router as qr_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
@@ -65,6 +66,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 _routers = (
+    health_router,
     login_router,
     catalog_otp_router,
     catalog_contacts_router,
@@ -94,12 +96,6 @@ _routers = (
 for _router in _routers:
     app.include_router(_router)
     app.include_router(_router, prefix="/api")
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    """Liveness probe for Render / load balancers. No auth. Prefer this over /docs."""
-    return {"status": "ok"}
 
 
 class ItemCreate(BaseModel):
