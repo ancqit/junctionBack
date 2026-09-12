@@ -426,6 +426,243 @@ def list_products_by_location(
     return [serialize_product(document) for document in documents]
 
 
+class CityProductMatch(BaseModel):
+    id: str
+    name: str
+    category: str
+    score: float
+    match_field: str
+
+
+class CityShopMatch(BaseModel):
+    id: str
+    name: str
+    city: str
+    locality: str
+    address: str | None = None
+    open_time: str | None = None
+    closed_time: str | None = None
+    is_open: bool = True
+    show_phone: bool = False
+    phone_number: str | None = None
+    shop_type: str | None = None
+    shop_type_label: str | None = None
+    avatar_url: str | None = None
+    digilocker_verified: bool = False
+    gst_verified: bool = False
+    currency: str = "INR"
+    matched_products: list[CityProductMatch] = Field(default_factory=list)
+    score: float = 0
+
+
+class CityProductSearchResponse(BaseModel):
+    query: str
+    city: str
+    total_shops: int
+    shops: list[CityShopMatch]
+
+
+def _tokenize_search_query(query: str) -> list[str]:
+    tokens = [token for token in re.split(r"[^\w]+", query.lower(), flags=re.UNICODE) if len(token) >= 2]
+    # Preserve order, drop duplicates.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ordered[:8]
+
+
+def _score_product_against_query(product: dict, tokens: list[str], raw_query: str) -> tuple[float, str] | None:
+    """Multi-field retrieval score (name → tags → category → description). Extensible for graph edges later."""
+    name = str(product.get("name") or "").lower()
+    category = str(product.get("category") or "").lower()
+    description = str(product.get("description") or "").lower()
+    tags = [str(tag).lower() for tag in (product.get("tags") or []) if str(tag).strip()]
+    raw = raw_query.lower().strip()
+
+    best = 0.0
+    reason = "name"
+
+    if raw and raw in name:
+        best = max(best, 12.0 + min(len(raw), 24) * 0.15)
+        reason = "name"
+    for token in tokens:
+        if token in name:
+            weight = 8.0 if name.startswith(token) or f" {token}" in f" {name}" else 5.5
+            if weight >= best:
+                best = weight
+                reason = "name"
+        if any(token in tag or tag in token for tag in tags):
+            if 4.0 > best:
+                best = 4.0
+                reason = "tag"
+        if token in category:
+            if 3.2 > best:
+                best = 3.2
+                reason = "category"
+        if token in description:
+            if 1.5 > best:
+                best = 1.5
+                reason = "description"
+
+    if best <= 0:
+        return None
+    # Prefer active / in-stock listings slightly.
+    if product.get("status", ProductStatus.active.value) == ProductStatus.active.value:
+        best += 0.4
+    if int(product.get("stock_quantity") or 0) > 0:
+        best += 0.2
+    return best, reason
+
+
+@router.get("/search", response_model=CityProductSearchResponse)
+def search_city_products(
+    auth: CatalogReader,
+    city: str = Query(..., min_length=1, max_length=80),
+    q: str = Query(..., min_length=1, max_length=120, description="Google-style product query for the city"),
+    limit: int = Query(default=40, ge=1, le=80),
+) -> CityProductSearchResponse:
+    """
+    City-junction product search: free-text `q` → shops in that city that list matching products.
+
+    Outlook is a simple search bar; retrieval scores name/tags/category/description
+    (and lightly shop name) so results feel Google-like. Session JWT or user JWT.
+    """
+    city_name = city.strip()
+    query_text = q.strip()
+    if not city_name or not query_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="city and q are required")
+
+    tokens = _tokenize_search_query(query_text)
+    if not tokens and len(query_text) < 2:
+        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+
+    shop_query: dict = {
+        "city": {"$regex": f"^{re.escape(city_name)}$", "$options": "i"},
+        "is_open": True,
+    }
+    if not is_junction_session(auth):
+        current_user = auth["user"]
+        role = get_user_role(current_user)
+        if role != UserRole.admin:
+            shop_query["owner_user_id"] = str(current_user["_id"])
+
+    city_shops = list(shops.find(shop_query))
+    if not city_shops:
+        return CityProductSearchResponse(query=query_text, city=city_name, total_shops=0, shops=[])
+
+    shop_by_id = {str(document["_id"]): document for document in city_shops}
+    store_ids = list(shop_by_id.keys())
+
+    # Broad candidate pull — token OR across name/tags/category — then precise score in Python.
+    or_clauses: list[dict] = []
+    for token in tokens or [query_text.lower()]:
+        escaped = re.escape(token)
+        or_clauses.extend(
+            [
+                {"name": {"$regex": escaped, "$options": "i"}},
+                {"category": {"$regex": escaped, "$options": "i"}},
+                {"tags": {"$regex": escaped, "$options": "i"}},
+                {"description": {"$regex": escaped, "$options": "i"}},
+            ]
+        )
+
+    product_query: dict = {
+        "store_id": {"$in": store_ids},
+        "status": {"$ne": ProductStatus.discontinued.value},
+        "$or": or_clauses,
+    }
+    candidates = list(products.find(product_query).limit(500))
+
+    shop_hits: dict[str, dict] = {}
+    for product in candidates:
+        scored = _score_product_against_query(product, tokens or [query_text.lower()], query_text)
+        if scored is None:
+            continue
+        score, match_field = scored
+        store_id = str(product.get("store_id") or "")
+        shop_doc = shop_by_id.get(store_id)
+        if shop_doc is None:
+            continue
+        bucket = shop_hits.setdefault(
+            store_id,
+            {"shop": shop_doc, "matches": [], "score": 0.0},
+        )
+        bucket["matches"].append(
+            CityProductMatch(
+                id=str(product["_id"]),
+                name=str(product.get("name") or ""),
+                category=str(product.get("category") or ""),
+                score=round(score, 2),
+                match_field=match_field,
+            )
+        )
+        bucket["score"] = max(bucket["score"], score)
+
+    # Light shop-name graph hop: shops whose name matches even without product hits.
+    raw_lower = query_text.lower()
+    for store_id, shop_doc in shop_by_id.items():
+        shop_name = str(shop_doc.get("name") or "").lower()
+        if raw_lower in shop_name or any(token in shop_name for token in tokens):
+            bucket = shop_hits.setdefault(
+                store_id,
+                {"shop": shop_doc, "matches": [], "score": 0.0},
+            )
+            shop_boost = 2.5
+            bucket["score"] = max(bucket["score"], shop_boost)
+
+    ranked = sorted(shop_hits.values(), key=lambda row: (-row["score"], str(row["shop"].get("name") or "")))
+    results: list[CityShopMatch] = []
+    for row in ranked[:limit]:
+        shop_doc = row["shop"]
+        matches = sorted(row["matches"], key=lambda hit: -hit.score)[:5]
+        phone = shop_doc.get("phone_number")
+        if isinstance(phone, str):
+            phone = phone.strip() or None
+        else:
+            phone = None
+        avatar = shop_doc.get("avatar_url")
+        if isinstance(avatar, str):
+            avatar = avatar.strip() or None
+        else:
+            avatar = None
+        results.append(
+            CityShopMatch(
+                id=str(shop_doc["_id"]),
+                name=str(shop_doc.get("name") or ""),
+                city=str(shop_doc.get("city") or ""),
+                locality=str(shop_doc.get("locality") or ""),
+                address=(str(shop_doc["address"]).strip() or None) if shop_doc.get("address") else None,
+                open_time=shop_doc.get("open_time"),
+                closed_time=shop_doc.get("closed_time"),
+                is_open=bool(shop_doc.get("is_open", True)),
+                show_phone=bool(shop_doc.get("show_phone", False)),
+                phone_number=phone,
+                shop_type=shop_doc.get("shop_type"),
+                shop_type_label=None,
+                avatar_url=avatar,
+                digilocker_verified=bool(shop_doc.get("digilocker_verified", False)),
+                gst_verified=bool(shop_doc.get("gst_verified", False)),
+                currency=(
+                    str(shop_doc.get("currency") or "INR").strip().upper()
+                    if shop_doc.get("currency")
+                    else "INR"
+                ),
+                matched_products=matches,
+                score=round(float(row["score"]), 2),
+            )
+        )
+
+    return CityProductSearchResponse(
+        query=query_text,
+        city=city_name,
+        total_shops=len(results),
+        shops=results,
+    )
+
+
 @router.get("/{product_id}", response_model=Product)
 def get_product(product_id: str, auth: CatalogReader) -> Product:
     """Get one product by id (owner-scoped for user JWT; public for junction.today session)."""
