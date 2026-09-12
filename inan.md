@@ -462,14 +462,24 @@ Prefer JSON on Render (update without redeploying):
 All endpoints require **admin** role.
 
 Phone numbers are the primary ops key. Users without a phone cannot create a shop (`can_create_shop=false`).
+New users record `platform` (`junction_website` | `junction_today` | `junction_blog`) at creation — no DB wipe required for legacy rows.
+
+**Plans (per shop, trial on number):**
+1. Free trial is on the phone/user once.
+2. While that trial is active, new shops share the trial window.
+3. After trial ends, the account is viewer; new shops are created locked in viewer mode.
+4. Paying / selecting a plan activates **that shop only** — siblings stay viewer.
+5. Admin assigns shop plans via `PATCH /admin/shops/{id}/plan` (preferred over syncing all shops).
 
 | Method | Endpoint | Use |
 |--------|----------|-----|
-| `GET` | `/admin/users` | List users with phone-first fields, plan status, shop briefs, and `can_create_shop`. Query: `q` (phone/name/email), `role`, `has_shop`, `has_phone`. |
+| `GET` | `/admin/users` | List users with phone-first fields, `platform`, plan status, shop briefs, and `can_create_shop`. Query: `q` (phone/name/email), `role`, `has_shop`, `has_phone`. |
 | `GET` | `/admin/users/by-phone` | Primary lookup by phone (`?phone=`). Normalizes `10`-digit / `91…` forms to `+91…`. |
 | `POST` | `/admin/users/{user_id}/activate` | Approve a viewer's pending waitlist application — upgrades them to `owner` with their requested plan (syncs shop plan when `shop_id` is set). |
 | `PATCH` | `/admin/users/{user_id}/role` | Change user role (`owner` / `viewer` / `admin`). Body: `{ "role": "viewer" }`. Prefer admin list for production admins. |
-| `PATCH` | `/admin/users/{user_id}/plan` | Assign a paid plan. Body: `{ "plan_type": "starter" \| "serious" \| "growth" \| "premium", "sync_shops": true }`. Sets role to `owner`. |
+| `PATCH` | `/admin/users/{user_id}/plan` | Assign a paid plan on the **user** account. Body: `{ "plan_type": "…", "sync_shops": false }`. Prefer shop endpoint; `sync_shops=true` pushes to every owned shop. |
+| `PATCH` | `/admin/shops/{shop_id}/plan` | Assign a paid plan to **one shop** (unlocks that shop only). Body: `{ "plan_type": "starter" \| "serious" \| "growth" \| "premium" }`. |
+| `DELETE` | `/admin/shops/{shop_id}` | Delete a shop after typed name confirm. Body: `{ "confirm_name": "Exact Shop Name" }`. |
 | `GET` | `/admin/role-keeper` | Read MongoDB role keeper (owner/viewer phone → role map). |
 | `PUT` | `/admin/role-keeper` | Update role keeper mappings. Admins cannot be added here. |
 | `GET` | `/admin/admins` | View loaded admin list (from env vars + `admin.json`). |

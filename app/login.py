@@ -18,6 +18,7 @@ from pymongo.errors import DuplicateKeyError
 from .admin_registry import is_admin_user
 from .database import otp_requests, users
 from .plan_service import PlanSummary, build_plan_summary, initialize_user_plan, resolve_login_plan_string, restore_persisted_plan
+from .platform import normalize_platform
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 from .role_keeper import resolve_role_from_keeper
 from .roles import UserRole, get_user_role
@@ -132,6 +133,8 @@ class OtpRequest(BaseModel):
     recaptcha_token: str | None = None
     play_integrity_token: str | None = None
     client_type: str | None = None
+    # Where the account was created: junction_website | junction_today | junction_blog
+    platform: str | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -520,7 +523,15 @@ def request_otp(request: Request, payload: OtpRequest) -> OtpRequestResponse:
     otp_requests.create_index("expires_at", expireAfterSeconds=0)
     otp_requests.update_one(
         {"phone_number": payload.phone_number},
-        {"$set": {"display_name": payload.display_name, "session_hash": hashlib.sha256(session_info.encode()).hexdigest(), "created_at": now, "expires_at": expires_at}},
+        {
+            "$set": {
+                "display_name": payload.display_name,
+                "session_hash": hashlib.sha256(session_info.encode()).hexdigest(),
+                "platform": normalize_platform(payload.platform).value,
+                "created_at": now,
+                "expires_at": expires_at,
+            }
+        },
         upsert=True,
     )
     return OtpRequestResponse(message="OTP sent by GCP Identity Platform", expires_in_seconds=OTP_EXPIRE_MINUTES * 60, session_info=session_info)
@@ -553,6 +564,7 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
     otp_requests.delete_one({"_id": request["_id"]})
     users.create_index("phone_number", unique=True, sparse=True)
     display_name = request["display_name"].strip()
+    platform = normalize_platform(request.get("platform")).value
     user = users.find_one({"phone_number": payload.phone_number})
     if user is None:
         document = {
@@ -560,6 +572,7 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
             "mobile_verified": True,
             "gcp_identity_id": gcp_user_id,
             "display_name": display_name,
+            "platform": platform,
             "role": resolve_role_for_user(phone_number=payload.phone_number),
             "account_status": "active",
             "bio": None,
@@ -578,9 +591,19 @@ def verify_otp(payload: OtpVerifyRequest) -> TokenResponse:
         raise HTTPException(status_code=500, detail="Could not create or load user after OTP verify")
     user = users.find_one_and_update(
         {"_id": user["_id"]},
-        {"$set": {"mobile_verified": True, "gcp_identity_id": gcp_user_id, "display_name": display_name, "updated_at": now}},
+        {
+            "$set": {
+                "mobile_verified": True,
+                "gcp_identity_id": gcp_user_id,
+                "display_name": display_name,
+                "updated_at": now,
+            },
+        },
         return_document=ReturnDocument.AFTER,
     )
+    if user is not None and not user.get("platform"):
+        users.update_one({"_id": user["_id"]}, {"$set": {"platform": platform}})
+        user = users.find_one({"_id": user["_id"]}) or user
     return token_response(user)
 
 

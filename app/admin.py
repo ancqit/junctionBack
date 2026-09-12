@@ -23,8 +23,10 @@ from .plan_service import (
     select_plan_for_shop,
     select_plan_for_user,
 )
+from .platform import PLATFORM_LABELS, Platform, normalize_platform
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
 from .roles import UserRole, get_user_role
+from .shop_cleanup import delete_shop_cascade
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -53,6 +55,8 @@ class AdminShopBrief(BaseModel):
     plan_type: PlanType | None = None
     plan_status: PlanStatus | None = None
     plan_name: str | None = None
+    is_locked: bool = False
+    lock_reason: str | None = None
 
 
 class AdminUserRecord(BaseModel):
@@ -60,6 +64,8 @@ class AdminUserRecord(BaseModel):
     display_name: str
     email: EmailStr | None = None
     phone_number: str | None = None
+    platform: str | None = None
+    platform_label: str | None = None
     role: UserRole
     account_status: str
     plan_type: PlanType
@@ -107,7 +113,17 @@ class UpdateUserRoleRequest(BaseModel):
 
 class AdminSetUserPlanRequest(BaseModel):
     plan_type: PlanType
-    sync_shops: bool = True
+    # Default false: plan is per-shop. Set true only to push the same plan onto every owned shop.
+    sync_shops: bool = False
+
+
+class AdminSetShopPlanRequest(BaseModel):
+    plan_type: PlanType
+
+
+class AdminDeleteShopRequest(BaseModel):
+    """GitHub-style confirm: client must send the exact shop name."""
+    confirm_name: str = Field(min_length=1, max_length=120)
 
 
 class AdminRejectApplicationRequest(BaseModel):
@@ -152,6 +168,8 @@ def _shop_briefs_by_owner(owner_ids: set[str]) -> dict[str, list[AdminShopBrief]
             plan_type=plan_type,
             plan_status=plan_status,
             plan_name=str(plan.get("name") or (plan_type.value if plan_type else "") or None) or None,
+            is_locked=bool(document.get("is_locked", False)),
+            lock_reason=str(document.get("lock_reason") or "") or None,
         )
         result.setdefault(owner_id, []).append(brief)
     return result
@@ -162,11 +180,17 @@ def serialize_admin_user(user: dict, shop_briefs: list[AdminShopBrief] | None = 
     phone = user.get("phone_number")
     has_phone = bool(isinstance(phone, str) and phone.strip())
     briefs = shop_briefs if shop_briefs is not None else []
+    platform_raw = user.get("platform")
+    platform: Platform | None = None
+    if isinstance(platform_raw, str) and platform_raw.strip():
+        platform = normalize_platform(platform_raw)
     return AdminUserRecord(
         id=str(user["_id"]),
         display_name=user.get("display_name", ""),
         email=user.get("email"),
         phone_number=phone,
+        platform=platform.value if platform else None,
+        platform_label=PLATFORM_LABELS.get(platform) if platform else None,
         role=get_user_role(user),
         account_status=user.get("account_status", "active"),
         plan_type=plan.type,
@@ -319,7 +343,7 @@ def set_user_plan(
     payload: AdminSetUserPlanRequest,
     _: Annotated[dict, Depends(require_admin)],
 ) -> AdminUserRecord:
-    """Admin plan grip: set the user plan and optionally sync owned shops."""
+    """Admin plan grip on the account. Prefer PATCH /admin/shops/{id}/plan for per-shop plans."""
     object_id = parse_object_id(user_id, "User")
     user = users.find_one({"_id": object_id})
     if user is None:
@@ -353,6 +377,54 @@ def set_user_plan(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     briefs = _shop_briefs_by_owner({user_id}).get(user_id, [])
     return serialize_admin_user(updated, briefs)
+
+
+@router.patch("/shops/{shop_id}/plan", response_model=AdminShopBrief)
+def set_shop_plan(
+    shop_id: str,
+    payload: AdminSetShopPlanRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> AdminShopBrief:
+    """Assign a paid plan to one shop only — siblings stay in viewer mode."""
+    if payload.plan_type == PlanType.free_trial:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Assign a paid plan type")
+    object_id = parse_object_id(shop_id, "Shop")
+    shop = shops.find_one({"_id": object_id})
+    if shop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+
+    summary = select_plan_for_shop(shop_id, payload.plan_type)
+    refreshed = shops.find_one({"_id": object_id}) or shop
+    return AdminShopBrief(
+        id=shop_id,
+        name=str(refreshed.get("name") or "Shop"),
+        plan_type=summary.type,
+        plan_status=summary.status,
+        plan_name=summary.name,
+        is_locked=bool(refreshed.get("is_locked", False)),
+        lock_reason=str(refreshed.get("lock_reason") or "") or None,
+    )
+
+
+@router.delete("/shops/{shop_id}")
+def admin_delete_shop(
+    shop_id: str,
+    payload: AdminDeleteShopRequest,
+    _: Annotated[dict, Depends(require_admin)],
+) -> dict:
+    """Delete a shop after typed name confirmation (GitHub-style)."""
+    object_id = parse_object_id(shop_id, "Shop")
+    shop = shops.find_one({"_id": object_id})
+    if shop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    expected = str(shop.get("name") or "").strip()
+    if payload.confirm_name.strip() != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Type the shop name "{expected}" to confirm delete',
+        )
+    delete_shop_cascade(shop_id)
+    return {"deleted": True, "shop_id": shop_id, "name": expected}
 
 
 @router.post("/plan-applications/{application_id}/reject", response_model=PlanApplication)

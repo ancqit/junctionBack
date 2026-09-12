@@ -17,7 +17,8 @@ from .plan_service import (
     PlanSummary,
     PlanType,
     build_shop_plan_summary,
-    default_plan_document,
+    plan_document_for_new_shop,
+    restore_persisted_plan,
     select_plan_for_shop,
 )
 from .products import Product, serialize_product
@@ -617,11 +618,17 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     """
     Create a shop for the logged-in mobile user.
     One phone/user may own multiple shops; shop names must be unique per owner.
+
+    Trial is on the number: while the account free trial is active, new shops share
+    that trial window. After trial ends, new shops are created in viewer mode
+    (locked / expired plan) — pay/select a plan per shop to activate that shop only.
     """
     ensure_shop_indexes()
 
+    owner = restore_persisted_plan(current_user)
     city, locality = ensure_city_and_locality(payload.city, payload.locality)
-    phone_number = get_user_phone_number(current_user)
+    phone_number = get_user_phone_number(owner)
+    shop_plan, is_locked, lock_reason = plan_document_for_new_shop(owner)
     now = datetime.now(timezone.utc)
     document = {
         "name": payload.name,
@@ -634,9 +641,11 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
         "show_phone": payload.show_phone,
         "phone_number": phone_number,
         "currency": payload.currency,
-        "owner_user_id": str(current_user["_id"]),
+        "owner_user_id": str(owner["_id"]),
         "shop_type": payload.shop_type,
-        "plan": default_plan_document(),
+        "plan": shop_plan,
+        "is_locked": is_locked,
+        "lock_reason": lock_reason,
         "created_at": now,
         "updated_at": now,
     }
