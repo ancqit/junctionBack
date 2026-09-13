@@ -146,10 +146,14 @@ There is no deactivated state. Users are either `admin`, `owner`, or `viewer`.
 
 ## DigiLocker (`/auth/digilocker`)
 
+Meri Pehchaan / [API Setu DigiLocker](https://apisetu.gov.in/digilocker) partner OAuth (OpenID Connect).
+Token URL must be `/public/oauth2/2/token` (v1 removed). Connect uses PKCE (S256).
+Callback failures redirect to `DIGILOCKER_SUCCESS_REDIRECT` with `digilocker=failed&reason=…`.
+
 | Method | Endpoint | Auth | Use |
 |--------|----------|------|-----|
-| `GET` | `/auth/digilocker/connect` | Bearer | Start DigiLocker OAuth. Returns `authorization_url` to redirect the user. Requires verified phone. |
-| `GET` | `/auth/digilocker/callback` | Public | OAuth callback. Query: `state`, `code` (or `error`). Marks user as DigiLocker-verified. |
+| `GET` | `/auth/digilocker/connect` | Bearer | Start DigiLocker OAuth for a shop (`?shop_id=`). Returns `authorization_url`. Requires verified phone. |
+| `GET` | `/auth/digilocker/callback` | Public | OAuth callback. Query: `state`, `code` (or `error`). Marks shop (or legacy user) DigiLocker-verified, then redirects to junction.website. |
 
 ---
 

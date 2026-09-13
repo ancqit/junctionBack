@@ -6,6 +6,8 @@ then POST taxpayerDetails. No paid KYC vendor required.
 
 Note: this depends on the public portal; treat as best-effort identity
 for shop owners, not a licensed GST Suvidha Provider feed.
+(API Setu DigiLocker is separate — see app/digilocker.py. Paid Setu.co
+GST KYC is intentionally not used here.)
 """
 
 import base64
@@ -18,9 +20,9 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
+from .access_control import ensure_shop_access, get_shop_by_store_id
 from .database import gst_sessions, shops, users
 from .login import get_current_user
-from .access_control import ensure_shop_access, get_shop_by_store_id
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter(prefix="/gst", tags=["gst"])
@@ -30,6 +32,15 @@ GST_CAPTCHA_URL = "https://services.gst.gov.in/services/captcha"
 GST_TAXPAYER_URL = "https://services.gst.gov.in/services/api/search/taxpayerDetails"
 SESSION_TTL_MINUTES = 10
 _GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$")
+
+_GST_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class GstCaptchaResponse(BaseModel):
@@ -80,16 +91,14 @@ class GstVerifyResponse(BaseModel):
     shop_id: str | None = None
 
 
-def _cookie_jar_from_list(items: list[dict]) -> httpx.Cookies:
-    cookies = httpx.Cookies()
+def _cookie_header_from_list(items: list[dict]) -> str:
+    parts: list[str] = []
     for item in items:
-        cookies.set(
-            item["name"],
-            item["value"],
-            domain=item.get("domain"),
-            path=item.get("path") or "/",
-        )
-    return cookies
+        name = item.get("name")
+        value = item.get("value")
+        if name and value is not None:
+            parts.append(f"{name}={value}")
+    return "; ".join(parts)
 
 
 def _cookies_to_list(cookies: httpx.Cookies) -> list[dict]:
@@ -104,21 +113,54 @@ def _cookies_to_list(cookies: httpx.Cookies) -> list[dict]:
     ]
 
 
+def _portal_error_detail(data: dict) -> str | None:
+    error_code = (data.get("errorCode") or data.get("error_code") or "").strip()
+    message = data.get("error") or data.get("message")
+    if isinstance(message, str):
+        message = message.strip() or None
+    else:
+        message = None
+
+    if error_code in {"SWEB_9000", "SWEB9000"}:
+        return "Invalid or expired captcha. Refresh the captcha and try again."
+    if error_code:
+        return message or f"GST portal rejected the request ({error_code})."
+    return message
+
+
 @router.get("/captcha", response_model=GstCaptchaResponse)
 @limiter.limit(RATE_LIMIT_AUTH)
 def get_gst_captcha(request: Request) -> GstCaptchaResponse:
     """Start a free GST portal captcha session for profile verification."""
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            client.get(GST_SEARCH_PAGE)
-            captcha_response = client.get(GST_CAPTCHA_URL)
+        with httpx.Client(timeout=25.0, follow_redirects=True, headers=_GST_BROWSER_HEADERS) as client:
+            page = client.get(
+                GST_SEARCH_PAGE,
+                headers={
+                    **_GST_BROWSER_HEADERS,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            page.raise_for_status()
+            captcha_response = client.get(
+                GST_CAPTCHA_URL,
+                headers={
+                    **_GST_BROWSER_HEADERS,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": GST_SEARCH_PAGE,
+                },
+            )
             captcha_response.raise_for_status()
             cookies = _cookies_to_list(client.cookies)
+            cookie_header = _cookie_header_from_list(cookies)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="Unable to reach GST portal for captcha") from exc
 
-    if not captcha_response.content:
-        raise HTTPException(status_code=502, detail="GST portal returned an empty captcha")
+    content_type = (captcha_response.headers.get("content-type") or "").lower()
+    if not captcha_response.content or (
+        "image" not in content_type and not captcha_response.content.startswith(b"\x89PNG")
+    ):
+        raise HTTPException(status_code=502, detail="GST portal returned an empty or invalid captcha")
 
     session_id = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
@@ -127,6 +169,7 @@ def get_gst_captcha(request: Request) -> GstCaptchaResponse:
         {
             "session_id": session_id,
             "cookies": cookies,
+            "cookie_header": cookie_header,
             "created_at": now,
             "expires_at": now + timedelta(minutes=SESSION_TTL_MINUTES),
         }
@@ -144,16 +187,42 @@ def verify_gstin(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> GstVerifyResponse:
     """Verify GSTIN against the public GST portal using the captcha session."""
-    stored = gst_sessions.find_one_and_delete({"session_id": payload.session_id})
+    stored = gst_sessions.find_one({"session_id": payload.session_id})
     if stored is None:
         raise HTTPException(status_code=400, detail="Captcha session expired. Refresh captcha and try again.")
 
-    cookies = _cookie_jar_from_list(stored.get("cookies") or [])
+    cookie_header = stored.get("cookie_header") or _cookie_header_from_list(stored.get("cookies") or [])
+    if not cookie_header:
+        gst_sessions.delete_one({"session_id": payload.session_id})
+        raise HTTPException(status_code=400, detail="Captcha session is invalid. Refresh captcha and try again.")
+
+    # Consume after we know the session exists — portal soft-failures still need a fresh captcha.
+    gst_sessions.delete_one({"session_id": payload.session_id})
+
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True, cookies=cookies) as client:
+        with httpx.Client(timeout=25.0, follow_redirects=True, headers=_GST_BROWSER_HEADERS) as client:
+            # Re-warm the search page with the same cookie jar (F5 / portal session affinity).
+            client.get(
+                GST_SEARCH_PAGE,
+                headers={
+                    **_GST_BROWSER_HEADERS,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Cookie": cookie_header,
+                    "Referer": GST_SEARCH_PAGE,
+                },
+            )
             response = client.post(
                 GST_TAXPAYER_URL,
                 json={"gstin": payload.gstin, "captcha": payload.captcha},
+                headers={
+                    **_GST_BROWSER_HEADERS,
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "Origin": "https://services.gst.gov.in",
+                    "Referer": GST_SEARCH_PAGE,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Cookie": cookie_header,
+                },
             )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="Unable to reach GST portal") from exc
@@ -169,15 +238,15 @@ def verify_gstin(
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Unexpected GST portal response")
 
-    error_message = data.get("error") or data.get("message")
+    portal_error = _portal_error_detail(data)
     legal_name = (data.get("lgnm") or data.get("legalName") or "").strip() or None
     trade_name = (data.get("tradeNam") or data.get("tradeName") or "").strip() or None
     gst_status = (data.get("sts") or data.get("status") or "").strip() or None
     taxpayer_type = (data.get("dty") or data.get("taxpayerType") or "").strip() or None
     returned_gstin = (data.get("gstin") or payload.gstin).strip().upper()
 
-    if not legal_name and error_message:
-        raise HTTPException(status_code=400, detail=str(error_message))
+    if not legal_name and portal_error:
+        raise HTTPException(status_code=400, detail=portal_error)
     if not legal_name:
         raise HTTPException(
             status_code=400,
