@@ -2,9 +2,10 @@
 
 Create studio lives on junction.monster. junction.today Promotion only
 lists shorts for a place and deep-links here to create.
-"""
 
-from __future__ import annotations
+Avoid `from __future__ import annotations`: with FastAPI/slowapi it turns
+UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
+"""
 
 import re
 from datetime import datetime, timezone
