@@ -8,12 +8,13 @@ UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
 """
 
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
 from pydantic import BaseModel, Field, field_validator
@@ -408,36 +409,6 @@ def stream_short_audio(request: Request, audio_id: str) -> StreamingResponse:
     )
 
 
-@router.post("/posts", response_model=MonsterPost, status_code=status.HTTP_201_CREATED)
-@router.post("/shorts", response_model=MonsterPost, status_code=status.HTTP_201_CREATED)
-@limiter.limit(RATE_LIMIT_AUTH)
-def create_monster_post(
-    request: Request,
-    payload: MonsterPostCreate,
-    auth: CatalogReader,
-) -> MonsterPost:
-    """
-    Publish a Junction (locality) video short.
-
-    Upload the clip first via POST /monster/shorts/video (junction.monster create studio).
-    Optional mix track via POST /monster/shorts/audio.
-    """
-    _ensure_indexes()
-    shop_doc = None
-    if payload.author_kind == "shop":
-        shop_id = (payload.shop_id or "").strip()
-        if not shop_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="shop_id is required for shop shorts")
-        shop_doc = _resolve_shop(shop_id)
-        if not is_junction_session(auth):
-            require_store_access(auth["user"], shop_id)
-
-    document = _create_short_document(payload, shop_doc=shop_doc)
-    result = monster_posts.insert_one(document)
-    document["_id"] = result.inserted_id
-    return _serialize(document)
-
-
 @router.get("/posts", response_model=MonsterPostList)
 @router.get("/shorts", response_model=MonsterPostList)
 @limiter.limit(RATE_LIMIT_CATALOG)
@@ -502,3 +473,80 @@ def get_monster_post(request: Request, post_id: str, _: CatalogReader) -> Monste
     if document is None or not document.get("video_id"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
     return _serialize(document)
+
+
+class MonsterPostCreated(MonsterPost):
+    """Create response — includes a one-time delete_token for the publisher."""
+
+    delete_token: str
+
+
+class MonsterPostDelete(BaseModel):
+    delete_token: str = Field(min_length=8, max_length=120)
+
+
+@router.post("/posts", response_model=MonsterPostCreated, status_code=status.HTTP_201_CREATED)
+@router.post("/shorts", response_model=MonsterPostCreated, status_code=status.HTTP_201_CREATED)
+@limiter.limit(RATE_LIMIT_AUTH)
+def create_monster_post(
+    request: Request,
+    payload: MonsterPostCreate,
+    auth: CatalogReader,
+) -> MonsterPostCreated:
+    """
+    Publish a Junction (locality) video short.
+
+    Upload the clip first via POST /monster/shorts/video (junction.monster create studio).
+    Optional mix track via POST /monster/shorts/audio.
+    """
+    _ensure_indexes()
+    shop_doc = None
+    if payload.author_kind == "shop":
+        shop_id = (payload.shop_id or "").strip()
+        if not shop_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="shop_id is required for shop shorts")
+        shop_doc = _resolve_shop(shop_id)
+        if not is_junction_session(auth):
+            require_store_access(auth["user"], shop_id)
+
+    document = _create_short_document(payload, shop_doc=shop_doc)
+    delete_token = secrets.token_urlsafe(24)
+    document["delete_token"] = delete_token
+    result = monster_posts.insert_one(document)
+    document["_id"] = result.inserted_id
+    created = _serialize(document)
+    return MonsterPostCreated(**created.model_dump(), delete_token=delete_token)
+
+
+@router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/shorts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(RATE_LIMIT_AUTH)
+def delete_monster_post(
+    request: Request,
+    post_id: str,
+    payload: MonsterPostDelete,
+    _: CatalogReader,
+) -> Response:
+    """Delete a short using the delete_token returned at publish time."""
+    _ = request
+    document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
+    if document is None or not document.get("video_id"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
+    stored = str(document.get("delete_token") or "")
+    if not stored or not secrets.compare_digest(stored, payload.delete_token.strip()):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this short")
+
+    video_id = str(document.get("video_id") or "").strip()
+    audio_id = str(document.get("audio_id") or "").strip()
+    if video_id and ObjectId.is_valid(video_id):
+        try:
+            short_video_fs.delete(ObjectId(video_id))
+        except Exception:
+            pass
+    if audio_id and ObjectId.is_valid(audio_id):
+        try:
+            short_audio_fs.delete(ObjectId(audio_id))
+        except Exception:
+            pass
+    monster_posts.delete_one({"_id": document["_id"]})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
