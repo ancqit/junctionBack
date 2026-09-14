@@ -34,8 +34,8 @@ SHORT_CAPTION_MAX = 150
 SHORT_TITLE_MAX = 48
 SHORT_AUTHOR_MAX = 60
 SHORT_DURATION_MAX_SEC = 30
-SHORT_VIDEO_MAX_BYTES = 25 * 1024 * 1024  # leaner for 30s clips
-SHORT_AUDIO_MAX_BYTES = 8 * 1024 * 1024
+SHORT_VIDEO_MAX_BYTES = 8 * 1024 * 1024  # ~3–5 MB typical after client compress; hard cap 8 MB
+SHORT_AUDIO_MAX_BYTES = 2 * 1024 * 1024
 SHORT_TTL_DAYS = 90
 SHORT_TTL_SECONDS = SHORT_TTL_DAYS * 24 * 60 * 60
 
@@ -294,7 +294,7 @@ async def upload_short_video(
     auth: CatalogReader,
     file: UploadFile = File(...),
 ) -> MonsterVideoUpload:
-    """Upload the video clip for a short (mp4/webm/mov, ≤30s intended, ≤25MB)."""
+    """Upload the video clip for a short (mp4/webm/mov, ≤30s intended, ≤8MB after client compress)."""
     _ = auth
     contents = await file.read()
     content_type = (file.content_type or "").split(";")[0].strip().lower()
