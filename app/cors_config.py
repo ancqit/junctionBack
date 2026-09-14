@@ -15,6 +15,8 @@ def load_cors_origins() -> list[str]:
         "https://junction-blog.vercel.app",
         "https://junction.blog",
         "https://www.junction.blog",
+        "https://junction.monster",
+        "https://www.junction.monster",
         "https://j-monster.vercel.app",
         "https://jmonster.vercel.app",
     ]
