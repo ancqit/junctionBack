@@ -137,10 +137,37 @@ def admin_plan_summary() -> PlanSummary:
         days_remaining=None,
         is_active=True,
         trial_used=False,
-        selected_plan_type=None,
+        selected_plan_type=PlanType.premium,
         in_grace_period=False,
         grace_ends_at=None,
     )
+
+
+def admin_shop_plan_document() -> dict:
+    """Persistent shop plan for admin-owned shops — premium, no expiry, unlocked."""
+    now = utc_now()
+    return {
+        "type": PlanType.premium.value,
+        "status": PlanStatus.active.value,
+        "started_at": now,
+        "ends_at": None,
+        "trial_used": False,
+        "viewing_applied": False,
+        "selected_plan_type": PlanType.premium.value,
+        "activated_by": "admin_default",
+    }
+
+
+def _shop_owner(shop: dict) -> dict | None:
+    owner_raw = str(shop.get("owner_user_id") or "").strip()
+    if not owner_raw or not ObjectId.is_valid(owner_raw):
+        return None
+    return users.find_one({"_id": ObjectId(owner_raw)})
+
+
+def shop_owner_is_admin(shop: dict) -> bool:
+    owner = _shop_owner(shop)
+    return owner is not None and get_user_role(owner) == UserRole.admin
 
 
 def default_plan_document() -> dict:
@@ -197,7 +224,7 @@ def plan_document_for_new_shop(owner: dict) -> tuple[dict, bool, str | None]:
       owned shop already has a paid plan.
     """
     if get_user_role(owner) == UserRole.admin:
-        return default_plan_document(), False, None
+        return admin_shop_plan_document(), False, None
 
     if user_has_active_number_trial(owner):
         plan = owner.get("plan") or {}
@@ -404,7 +431,7 @@ def expire_trial_if_needed(user: dict) -> dict:
 def resolve_login_plan_string(user: dict) -> str:
     """Return selected plan slug for login, or empty string when not on free trial/starter."""
     if get_user_role(user) == UserRole.admin:
-        return ""
+        return PlanType.premium.value
 
     plan = user.get("plan") or {}
     plan_type = plan.get("type")
@@ -728,16 +755,52 @@ def get_shop_document(store_id: str) -> dict:
 
 
 def ensure_shop_has_plan(shop: dict) -> dict:
-    """Attach a free-trial plan to legacy shops that do not have one yet."""
+    """Attach a plan to legacy shops that do not have one yet."""
     if shop.get("plan"):
         return shop
-    plan = default_plan_document()
+    plan = admin_shop_plan_document() if shop_owner_is_admin(shop) else default_plan_document()
     updated = shops.find_one_and_update(
         {"_id": shop["_id"]},
-        {"$set": {"plan": plan, "updated_at": utc_now()}},
+        {
+            "$set": {
+                "plan": plan,
+                "is_locked": False if plan.get("type") == PlanType.premium.value else shop.get("is_locked", False),
+                "lock_reason": None if plan.get("type") == PlanType.premium.value else shop.get("lock_reason"),
+                "updated_at": utc_now(),
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
     return updated or {**shop, "plan": plan}
+
+
+def heal_admin_owned_shop_plan(shop: dict) -> dict:
+    """Ensure admin-owned shops stay on unlocked premium (fixes legacy trial/expired rows)."""
+    if not shop_owner_is_admin(shop):
+        return shop
+    plan = shop.get("plan") or {}
+    needs_heal = (
+        shop.get("is_locked")
+        or plan.get("type") != PlanType.premium.value
+        or plan.get("status") != PlanStatus.active.value
+        or plan.get("ends_at") is not None
+    )
+    if not needs_heal:
+        return shop
+    now = utc_now()
+    updated = shops.find_one_and_update(
+        {"_id": shop["_id"]},
+        {
+            "$set": {
+                "plan": admin_shop_plan_document(),
+                "is_locked": False,
+                "lock_reason": None,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or shop
 
 
 def sync_owner_viewer_from_shop(shop: dict) -> None:
@@ -767,6 +830,8 @@ def sync_owner_viewer_from_shop(shop: dict) -> None:
 
 
 def expire_shop_trial_if_needed(shop: dict) -> dict:
+    if shop_owner_is_admin(shop):
+        return heal_admin_owned_shop_plan(shop)
     plan = shop.get("plan")
     if not plan:
         return shop
@@ -861,6 +926,9 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
 
 def build_shop_plan_summary(shop: dict) -> PlanSummary:
     shop = ensure_shop_has_plan(shop)
+    if shop_owner_is_admin(shop):
+        heal_admin_owned_shop_plan(shop)
+        return admin_plan_summary()
     shop = expire_shop_trial_if_needed(shop)
     shop = expire_shop_paid_plan_if_needed(shop)
     shop = expire_shop_grace_period_if_needed(shop)
@@ -966,18 +1034,21 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
         return_document=ReturnDocument.AFTER,
     )
     # Selecting a plan for this shop does not unlock sibling shops.
+    # Never demote platform admins to owner.
     owner_id = str((updated or shop).get("owner_user_id") or "")
     if owner_id:
-        users.update_one(
-            {"_id": parse_object_id(owner_id, "User")},
-            {
-                "$set": {
-                    "role": UserRole.owner.value,
-                    "plan.viewing_applied": False,
-                    "updated_at": now,
-                }
-            },
-        )
+        owner = users.find_one({"_id": parse_object_id(owner_id, "User")})
+        if owner is None or get_user_role(owner) != UserRole.admin:
+            users.update_one(
+                {"_id": parse_object_id(owner_id, "User")},
+                {
+                    "$set": {
+                        "role": UserRole.owner.value,
+                        "plan.viewing_applied": False,
+                        "updated_at": now,
+                    }
+                },
+            )
     return build_shop_plan_summary(updated or shop)
 
 
