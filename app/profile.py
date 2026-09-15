@@ -429,8 +429,7 @@ def list_today_notices(
     """
     Today's notices. Public and junction-agnostic. Optional store_id/shop_id filters to one shop.
 
-    Full-day feed is sorted by updated_at ascending (FIFO queue: oldest first) so
-    clients can take the last N entries as the recent notice-board window.
+    Full-day feed is sorted by updated_at descending (newest first), like a social feed.
     Each notice includes shop_name, city, and locality from the shop catalog.
     """
     notice_date = today_utc().isoformat()
@@ -439,6 +438,6 @@ def list_today_notices(
         document = _find_today_notice(requested)
         return serialize_notices([document]) if document else []
 
-    # FIFO queue: oldest first — junction-agnostic global feed
-    documents = list(notices.find({"notice_date": notice_date}).sort("updated_at", 1))
+    # Newest first — Facebook-style feed
+    documents = list(notices.find({"notice_date": notice_date}).sort("updated_at", -1))
     return serialize_notices(documents)
