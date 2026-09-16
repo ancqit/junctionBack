@@ -7,13 +7,14 @@ Avoid `from __future__ import annotations`: with FastAPI/slowapi it turns
 UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
 """
 
+import os
 import re
 import secrets
 from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
@@ -40,6 +41,8 @@ SHORT_AUDIO_MAX_BYTES = 2 * 1024 * 1024
 SHORT_POSTER_MAX_BYTES = 512 * 1024
 SHORT_TTL_DAYS = 30
 SHORT_TTL_SECONDS = SHORT_TTL_DAYS * 24 * 60 * 60
+# Interim moderation key — set on Render to delete by id without admin JWT / publish token.
+MONSTER_MOD_KEY = (os.getenv("MONSTER_MOD_KEY") or "").strip()
 
 ALLOWED_VIDEO_TYPES = {
     "video/mp4": ".mp4",
@@ -652,7 +655,13 @@ class MonsterPostCreated(MonsterPost):
 
 
 class MonsterPostDelete(BaseModel):
-    delete_token: str = Field(min_length=8, max_length=120)
+    delete_token: str | None = Field(default=None, max_length=120)
+
+
+def _mod_key_ok(provided: str | None) -> bool:
+    if not MONSTER_MOD_KEY or not provided:
+        return False
+    return secrets.compare_digest(provided.strip(), MONSTER_MOD_KEY)
 
 
 @router.post("/posts", response_model=MonsterPostCreated, status_code=status.HTTP_201_CREATED)
@@ -703,8 +712,33 @@ def delete_monster_post(
     if document is None or not document.get("video_id"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
     stored = str(document.get("delete_token") or "")
-    if not stored or not secrets.compare_digest(stored, payload.delete_token.strip()):
+    token = (payload.delete_token or "").strip()
+    if not stored or not token or not secrets.compare_digest(stored, token):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this short")
+    purge_short_document(document)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/shorts/{post_id}/mod", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(RATE_LIMIT_AUTH)
+def delete_monster_post_with_mod_key(
+    request: Request,
+    post_id: str,
+    x_monster_mod_key: str | None = Header(default=None, alias="X-Monster-Mod-Key"),
+    mod_key: str | None = Query(default=None, max_length=120),
+) -> Response:
+    """Interim: delete by post id + MONSTER_MOD_KEY only (no admin JWT, no publish token)."""
+    _ = request
+    if not MONSTER_MOD_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MONSTER_MOD_KEY is not configured on this server",
+        )
+    if not _mod_key_ok(x_monster_mod_key or mod_key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid mod key")
+    document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
+    if document is None or not document.get("video_id"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
     purge_short_document(document)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
