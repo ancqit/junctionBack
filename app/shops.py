@@ -227,6 +227,17 @@ class ShopPlanSelectRequest(BaseModel):
     plan_type: PlanType
 
 
+class ShopBillingHint(BaseModel):
+    """Product rules for clients: trial is phone-scoped; paid plans are shop-scoped."""
+
+    trial_scope: Literal["phone"] = "phone"
+    plan_scope: Literal["shop"] = "shop"
+    summary: str = (
+        "Free trial is linked to your phone number. Paid plans apply per shop — "
+        "other shops stay locked until each is paid."
+    )
+
+
 class Shop(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -254,6 +265,7 @@ class Shop(BaseModel):
     is_locked: bool = False
     lock_reason: Literal["manual", "plan_expired"] | None = None
     plan: PlanSummary | None = None
+    billing_hint: ShopBillingHint = Field(default_factory=ShopBillingHint)
     created_at: datetime
     updated_at: datetime
 
@@ -349,6 +361,7 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         is_locked=bool(document.get("is_locked", False)),
         lock_reason=_normalize_lock_reason(document.get("lock_reason"), bool(document.get("is_locked", False))),
         plan=plan_summary,
+        billing_hint=ShopBillingHint(),
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )

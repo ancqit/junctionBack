@@ -2,8 +2,8 @@
 
 Plans live on the shop (see PLAN_CATALOG):
   - free_trial: 40 products / 15 days
-  - serious: 40 products / 1 year (paid Free Trial conversion)
   - starter: 10 products / INR 999 / 1 year
+  - serious: 40 products / 1 year (paid Free Trial conversion)
   - growth: 80 products / INR 2999 / 1 year
   - premium: 150 products / INR 5999 / 1 year
 
@@ -18,7 +18,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from .access_control import AuthenticatedUser, require_store_access, resolve_store_id
 from .database import product_buckets, products
-from .plan_service import PlanType, build_shop_plan_summary, get_shop_document, require_active_shop_plan
+from .plan_service import (
+    PlanType,
+    admin_plan_summary,
+    build_shop_plan_summary,
+    get_shop_document,
+    require_active_shop_plan,
+    shop_owner_is_admin,
+)
 from .roles import UserRole, get_user_role
 
 router = APIRouter(prefix="/product-bucket", tags=["product-bucket"])
@@ -118,7 +125,7 @@ def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
 
     if get_user_role(user) == UserRole.admin:
         shop = get_shop_document(store_id)
-        summary = build_shop_plan_summary(shop)
+        summary = admin_plan_summary() if shop_owner_is_admin(shop) else build_shop_plan_summary(shop)
     else:
         _, summary = require_active_shop_plan(store_id)
 
