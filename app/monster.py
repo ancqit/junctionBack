@@ -351,10 +351,13 @@ def _serialize(document: dict) -> MonsterPost:
         author_name = shop_name
     caption = str(document.get("caption") or document.get("body") or "")
     video_id = str(document.get("video_id") or "")
+    playback_video_id = str(document.get("playback_video_id") or "").strip()
+    play_id = playback_video_id or video_id
     audio_id = (str(document["audio_id"]).strip() or None) if document.get("audio_id") else None
     poster_id = (str(document["poster_id"]).strip() or None) if document.get("poster_id") else None
     city = str(document.get("city") or "").strip()
-    video_url = _video_url(video_id) if video_id else ""
+    # Prefer lean playback rendition for in-feed / post play; master stays for download.
+    video_url = _video_url(play_id) if play_id else ""
     status_value = str(document.get("status") or "ready")
     if status_value not in {"ready", "processing", "failed"}:
         status_value = "ready"
@@ -770,13 +773,15 @@ def purge_short_document(document: dict) -> str:
     """Remove a short row and its GridFS blobs. Returns the post id."""
     post_id = str(document["_id"])
     video_id = str(document.get("video_id") or "").strip()
+    playback_video_id = str(document.get("playback_video_id") or "").strip()
     audio_id = str(document.get("audio_id") or "").strip()
     poster_id = str(document.get("poster_id") or "").strip()
-    if video_id and ObjectId.is_valid(video_id):
-        try:
-            short_video_fs.delete(ObjectId(video_id))
-        except Exception:
-            pass
+    for blob_id in {video_id, playback_video_id}:
+        if blob_id and ObjectId.is_valid(blob_id):
+            try:
+                short_video_fs.delete(ObjectId(blob_id))
+            except Exception:
+                pass
     if audio_id and ObjectId.is_valid(audio_id):
         try:
             short_audio_fs.delete(ObjectId(audio_id))
