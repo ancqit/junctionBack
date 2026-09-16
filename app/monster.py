@@ -1,7 +1,7 @@
 """Video shorts for junction.monster — Instagram/YouTube-style, Junction-bound.
 
-Create studio lives on junction.monster. junction.today Promotion only
-lists shorts for a place and deep-links here to create.
+Create studio lives on junction.monster. junction.today Promotion lists
+shorts for a place and plays them in-feed (create still deep-links here).
 
 Avoid `from __future__ import annotations`: with FastAPI/slowapi it turns
 UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
@@ -35,8 +35,9 @@ SHORT_CAPTION_MAX = 150
 SHORT_TITLE_MAX = 48
 SHORT_AUTHOR_MAX = 60
 SHORT_DURATION_MAX_SEC = 30
-SHORT_VIDEO_MAX_BYTES = 12 * 1024 * 1024  # client targets ~10–12 MB after compress; hard cap 12 MB
+SHORT_VIDEO_MAX_BYTES = 40 * 1024 * 1024  # masters OK; playback quality comes from delivery, not phone crush
 SHORT_AUDIO_MAX_BYTES = 2 * 1024 * 1024
+SHORT_POSTER_MAX_BYTES = 512 * 1024
 SHORT_TTL_DAYS = 90
 SHORT_TTL_SECONDS = SHORT_TTL_DAYS * 24 * 60 * 60
 
@@ -53,10 +54,17 @@ ALLOWED_AUDIO_TYPES = {
     "audio/webm": ".webm",
     "audio/x-m4a": ".m4a",
 }
+ALLOWED_POSTER_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 _WHITESPACE_RE = re.compile(r"\s+")
 short_video_fs = GridFS(database, collection="monster_short_videos")
 short_audio_fs = GridFS(database, collection="monster_short_audio")
+short_poster_fs = GridFS(database, collection="monster_short_posters")
 
 
 def _compact_text(value: str) -> str:
@@ -78,6 +86,13 @@ class MonsterAudioUpload(BaseModel):
     track_name: str = ""
 
 
+class MonsterPosterUpload(BaseModel):
+    poster_id: str
+    content_type: str
+    size_bytes: int
+    filename: str
+
+
 class MonsterPostCreate(BaseModel):
     """Publish a short after uploading video via POST /monster/shorts/video."""
 
@@ -93,6 +108,7 @@ class MonsterPostCreate(BaseModel):
     shop_id: str | None = Field(default=None, max_length=80)
     video_id: str = Field(min_length=1, max_length=80)
     audio_id: str | None = Field(default=None, max_length=80)
+    poster_id: str | None = Field(default=None, max_length=80)
     track_name: str = Field(default="", max_length=80)
     duration_seconds: int = Field(default=15, ge=1, le=SHORT_DURATION_MAX_SEC)
 
@@ -106,6 +122,7 @@ class MonsterPostCreate(BaseModel):
         "shop_id",
         "video_id",
         "audio_id",
+        "poster_id",
         "track_name",
         mode="before",
     )
@@ -130,6 +147,10 @@ class MonsterPost(BaseModel):
     shop_name: str | None = None
     video_id: str
     video_url: str
+    playback_url: str = ""
+    poster_id: str | None = None
+    poster_url: str | None = None
+    status: Literal["ready", "processing", "failed"] = "ready"
     audio_id: str | None = None
     audio_url: str | None = None
     track_name: str = ""
@@ -161,6 +182,69 @@ def _video_url(video_id: str) -> str:
 
 def _audio_url(audio_id: str) -> str:
     return f"/monster/shorts/audio/{audio_id}"
+
+
+def _poster_url(poster_id: str) -> str:
+    return f"/monster/shorts/poster/{poster_id}"
+
+
+def _parse_byte_range(range_header: str | None, length: int) -> tuple[int, int] | None:
+    """Return inclusive (start, end) for a single bytes range, or None for full body."""
+    if not range_header or length <= 0:
+        return None
+    match = re.match(r"bytes=(\d*)-(\d*)", range_header.strip())
+    if not match:
+        return None
+    start_raw, end_raw = match.group(1), match.group(2)
+    if start_raw == "" and end_raw == "":
+        return None
+    if start_raw == "":
+        # suffix: last N bytes
+        suffix = int(end_raw)
+        if suffix <= 0:
+            return None
+        start = max(0, length - suffix)
+        end = length - 1
+        return start, end
+    start = int(start_raw)
+    end = int(end_raw) if end_raw else length - 1
+    if start >= length:
+        return None
+    end = min(end, length - 1)
+    if end < start:
+        return None
+    return start, end
+
+
+def _stream_grid_file(request: Request, grid_out, *, default_media_type: str, default_filename: str) -> Response:
+    length = int(getattr(grid_out, "length", 0) or 0)
+    media_type = grid_out.content_type or default_media_type
+    filename = grid_out.filename or default_filename
+    base_headers = {
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "Cache-Control": "public, max-age=86400",
+        "Accept-Ranges": "bytes",
+    }
+    byte_range = _parse_byte_range(request.headers.get("range"), length)
+    if byte_range is None:
+        if length:
+            base_headers["Content-Length"] = str(length)
+        return StreamingResponse(grid_out, media_type=media_type, headers=base_headers)
+
+    start, end = byte_range
+    size = end - start + 1
+    grid_out.seek(start)
+    chunk = grid_out.read(size)
+    return Response(
+        content=chunk,
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        media_type=media_type,
+        headers={
+            **base_headers,
+            "Content-Length": str(size),
+            "Content-Range": f"bytes {start}-{end}/{length}",
+        },
+    )
 
 
 def _require_place(scope: MonsterScope, city: str | None, locality: str | None) -> tuple[str, str | None]:
@@ -208,6 +292,16 @@ def _assert_audio_exists(audio_id: str) -> ObjectId:
     return oid
 
 
+def _assert_poster_exists(poster_id: str) -> ObjectId:
+    try:
+        oid = ObjectId(poster_id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid poster_id") from exc
+    if not short_poster_fs.exists(oid):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not found")
+    return oid
+
+
 def _serialize(document: dict) -> MonsterPost:
     author_kind = document.get("author_kind") or "person"
     shop_name = (str(document["shop_name"]).strip() or None) if document.get("shop_name") else None
@@ -217,7 +311,12 @@ def _serialize(document: dict) -> MonsterPost:
     caption = str(document.get("caption") or document.get("body") or "")
     video_id = str(document.get("video_id") or "")
     audio_id = (str(document["audio_id"]).strip() or None) if document.get("audio_id") else None
+    poster_id = (str(document["poster_id"]).strip() or None) if document.get("poster_id") else None
     city = str(document.get("city") or "").strip()
+    video_url = _video_url(video_id) if video_id else ""
+    status_value = str(document.get("status") or "ready")
+    if status_value not in {"ready", "processing", "failed"}:
+        status_value = "ready"
     return MonsterPost(
         id=str(document["_id"]),
         author_name=author_name,
@@ -231,7 +330,11 @@ def _serialize(document: dict) -> MonsterPost:
         shop_id=(str(document["shop_id"]).strip() or None) if document.get("shop_id") else None,
         shop_name=shop_name,
         video_id=video_id,
-        video_url=_video_url(video_id) if video_id else "",
+        video_url=video_url,
+        playback_url=video_url,
+        poster_id=poster_id,
+        poster_url=_poster_url(poster_id) if poster_id else None,
+        status=status_value,  # type: ignore[arg-type]
         audio_id=audio_id,
         audio_url=_audio_url(audio_id) if audio_id else None,
         track_name=str(document.get("track_name") or ""),
@@ -255,6 +358,9 @@ def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None)
     audio_id = (payload.audio_id or "").strip() or None
     if audio_id:
         _assert_audio_exists(audio_id)
+    poster_id = (payload.poster_id or "").strip() or None
+    if poster_id:
+        _assert_poster_exists(poster_id)
 
     caption = payload.caption or payload.body
     now = datetime.now(timezone.utc)
@@ -266,12 +372,15 @@ def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None)
         "author_kind": payload.author_kind,
         "video_id": payload.video_id,
         "duration_seconds": payload.duration_seconds,
+        "status": "ready",
         "created_at": now,
     }
     if payload.title:
         document["title"] = payload.title
     if audio_id:
         document["audio_id"] = audio_id
+    if poster_id:
+        document["poster_id"] = poster_id
     if payload.track_name:
         document["track_name"] = payload.track_name
 
@@ -295,7 +404,7 @@ async def upload_short_video(
     auth: CatalogReader,
     file: UploadFile = File(...),
 ) -> MonsterVideoUpload:
-    """Upload the video clip for a short (mp4/webm/mov, ≤30s intended, ≤8MB after client compress)."""
+    """Upload the video clip for a short (mp4/webm/mov, ≤30s intended, ≤40MB master)."""
     _ = auth
     contents = await file.read()
     content_type = (file.content_type or "").split(";")[0].strip().lower()
@@ -368,30 +477,85 @@ async def upload_short_audio(
     )
 
 
+@router.post("/shorts/poster", response_model=MonsterPosterUpload, status_code=status.HTTP_201_CREATED)
+@limiter.limit(RATE_LIMIT_AUTH)
+async def upload_short_poster(
+    request: Request,
+    auth: CatalogReader,
+    file: UploadFile = File(...),
+) -> MonsterPosterUpload:
+    """Upload a JPEG/PNG/WebP poster frame for in-feed instant paint."""
+    _ = auth
+    contents = await file.read()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in ALLOWED_POSTER_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only JPEG, PNG, or WebP posters are supported",
+        )
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded poster is empty")
+    if len(contents) > SHORT_POSTER_MAX_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Poster must be {SHORT_POSTER_MAX_BYTES // 1024} KB or smaller",
+        )
+
+    filename = (file.filename or f"poster{ALLOWED_POSTER_TYPES[content_type]}").strip() or "poster.jpg"
+    file_id = short_poster_fs.put(
+        contents,
+        content_type=content_type,
+        filename=filename,
+        metadata={"kind": "monster_short_poster", "uploaded_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return MonsterPosterUpload(
+        poster_id=str(file_id),
+        content_type=content_type,
+        size_bytes=len(contents),
+        filename=filename,
+    )
+
+
 @router.get("/shorts/video/{video_id}")
 @router.get("/posts/video/{video_id}")
 @limiter.limit(RATE_LIMIT_CATALOG)
-def stream_short_video(request: Request, video_id: str) -> StreamingResponse:
-    """Public stream so <video src> works (create/list still need session)."""
+def stream_short_video(request: Request, video_id: str) -> Response:
+    """Public stream with byte-Range so feed players can start immediately."""
     try:
         oid = ObjectId(video_id)
         grid_out = short_video_fs.get(oid)
     except (NoFile, Exception) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found") from exc
 
-    return StreamingResponse(
+    return _stream_grid_file(
+        request,
         grid_out,
-        media_type=grid_out.content_type or "video/mp4",
-        headers={
-            "Content-Disposition": f'inline; filename="{grid_out.filename or "short.mp4"}"',
-            "Cache-Control": "public, max-age=86400",
-        },
+        default_media_type="video/mp4",
+        default_filename="short.mp4",
+    )
+
+
+@router.get("/shorts/poster/{poster_id}")
+@limiter.limit(RATE_LIMIT_CATALOG)
+def stream_short_poster(request: Request, poster_id: str) -> Response:
+    """Public poster image for feed cards."""
+    try:
+        oid = ObjectId(poster_id)
+        grid_out = short_poster_fs.get(oid)
+    except (NoFile, Exception) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not found") from exc
+
+    return _stream_grid_file(
+        request,
+        grid_out,
+        default_media_type="image/jpeg",
+        default_filename="poster.jpg",
     )
 
 
 @router.get("/shorts/audio/{audio_id}")
 @limiter.limit(RATE_LIMIT_CATALOG)
-def stream_short_audio(request: Request, audio_id: str) -> StreamingResponse:
+def stream_short_audio(request: Request, audio_id: str) -> Response:
     """Public stream for mix tracks under a short."""
     try:
         oid = ObjectId(audio_id)
@@ -399,13 +563,11 @@ def stream_short_audio(request: Request, audio_id: str) -> StreamingResponse:
     except (NoFile, Exception) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found") from exc
 
-    return StreamingResponse(
+    return _stream_grid_file(
+        request,
         grid_out,
-        media_type=grid_out.content_type or "audio/mpeg",
-        headers={
-            "Content-Disposition": f'inline; filename="{grid_out.filename or "track.mp3"}"',
-            "Cache-Control": "public, max-age=86400",
-        },
+        default_media_type="audio/mpeg",
+        default_filename="track.mp3",
     )
 
 
@@ -425,7 +587,10 @@ def list_monster_posts(
 ) -> MonsterPostList:
     """List shorts. View layers: locality, city (all localities), or global (all places)."""
     _ensure_indexes()
-    query: dict = {"video_id": {"$exists": True, "$ne": ""}}
+    query: dict = {
+        "video_id": {"$exists": True, "$ne": ""},
+        "$or": [{"status": "ready"}, {"status": {"$exists": False}}],
+    }
     city_name: str | None = None
     locality_name: str | None = None
     resolved_scope: MonsterScope | None = None
@@ -538,6 +703,7 @@ def delete_monster_post(
 
     video_id = str(document.get("video_id") or "").strip()
     audio_id = str(document.get("audio_id") or "").strip()
+    poster_id = str(document.get("poster_id") or "").strip()
     if video_id and ObjectId.is_valid(video_id):
         try:
             short_video_fs.delete(ObjectId(video_id))
@@ -546,6 +712,11 @@ def delete_monster_post(
     if audio_id and ObjectId.is_valid(audio_id):
         try:
             short_audio_fs.delete(ObjectId(audio_id))
+        except Exception:
+            pass
+    if poster_id and ObjectId.is_valid(poster_id):
+        try:
+            short_poster_fs.delete(ObjectId(poster_id))
         except Exception:
             pass
     monster_posts.delete_one({"_id": document["_id"]})
