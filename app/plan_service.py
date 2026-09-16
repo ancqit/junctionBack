@@ -45,9 +45,9 @@ PLAN_CATALOG: dict[str, dict] = {
     PlanType.starter.value: {
         "name": "Starter",
         "price_inr": 999,
-        "max_products": 40,
+        "max_products": 10,
         "profile_only": False,
-        "description": "Shop profile with up to 40 products for 1 year (INR 999)",
+        "description": "Shop profile with up to 10 products for 1 year (INR 999)",
         "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.serious.value: {

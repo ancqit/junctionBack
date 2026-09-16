@@ -26,7 +26,7 @@ from .roles import UserRole, get_user_role
 router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 JWT_SECRET = os.getenv("JWT_SECRET", "")
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "720"))
 PBKDF2_ITERATIONS = 600_000
 OTP_EXPIRE_MINUTES = int(os.getenv("OTP_EXPIRE_MINUTES", "5"))
 GCP_IDENTITY_PLATFORM_API_KEY = os.getenv("GCP_IDENTITY_PLATFORM_API_KEY", "")
