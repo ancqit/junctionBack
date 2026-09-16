@@ -550,3 +550,83 @@ def refresh_admin_registry_endpoint(_: Annotated[dict, Depends(require_admin)]) 
         loaded_at=get_admin_registry_loaded_at(),
         file_path=ADMIN_LIST_PATH,
     )
+
+
+class AdminShortRecord(BaseModel):
+    id: str
+    author_name: str
+    title: str = ""
+    caption: str = ""
+    city: str = ""
+    locality: str | None = None
+    author_kind: str = "person"
+    shop_id: str | None = None
+    shop_name: str | None = None
+    video_id: str = ""
+    duration_seconds: int = 15
+    created_at: datetime
+
+
+class AdminShortList(BaseModel):
+    total: int
+    posts: list[AdminShortRecord]
+
+
+class AdminShortDeleteResponse(BaseModel):
+    deleted: bool
+    post_id: str
+    author_name: str = ""
+    caption: str = ""
+
+
+@router.get("/monster/shorts", response_model=AdminShortList)
+def admin_list_shorts(
+    _: Annotated[dict, Depends(require_admin)],
+    city: str | None = Query(default=None, max_length=80),
+    locality: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=40, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> AdminShortList:
+    """List recent shorts for moderation (interim until creator delete is solid)."""
+    from .database import monster_posts
+    from .monster import _serialize
+
+    query: dict = {"video_id": {"$exists": True, "$ne": ""}}
+    if city and city.strip():
+        query["city"] = {"$regex": f"^{city.strip()}$", "$options": "i"}
+    if locality and locality.strip():
+        query["locality"] = {"$regex": f"^{locality.strip()}$", "$options": "i"}
+    total = monster_posts.count_documents(query)
+    docs = monster_posts.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    posts: list[AdminShortRecord] = []
+    for doc in docs:
+        row = _serialize(doc)
+        posts.append(
+            AdminShortRecord(
+                id=row.id,
+                author_name=row.author_name,
+                title=row.title,
+                caption=row.caption,
+                city=row.city,
+                locality=row.locality,
+                author_kind=row.author_kind,
+                shop_id=row.shop_id,
+                shop_name=row.shop_name,
+                video_id=row.video_id,
+                duration_seconds=row.duration_seconds,
+                created_at=row.created_at,
+            )
+        )
+    return AdminShortList(total=total, posts=posts)
+
+
+@router.delete("/monster/shorts/{post_id}", response_model=AdminShortDeleteResponse)
+def admin_delete_monster_short(
+    post_id: str,
+    _: Annotated[dict, Depends(require_admin)],
+) -> AdminShortDeleteResponse:
+    """Delete any short by id — no publish delete_token required."""
+    from .monster import admin_delete_short
+
+    result = admin_delete_short(post_id)
+    return AdminShortDeleteResponse(**result)

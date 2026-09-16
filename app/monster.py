@@ -705,7 +705,13 @@ def delete_monster_post(
     stored = str(document.get("delete_token") or "")
     if not stored or not secrets.compare_digest(stored, payload.delete_token.strip()):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this short")
+    purge_short_document(document)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+
+def purge_short_document(document: dict) -> str:
+    """Remove a short row and its GridFS blobs. Returns the post id."""
+    post_id = str(document["_id"])
     video_id = str(document.get("video_id") or "").strip()
     audio_id = str(document.get("audio_id") or "").strip()
     poster_id = str(document.get("poster_id") or "").strip()
@@ -725,4 +731,20 @@ def delete_monster_post(
         except Exception:
             pass
     monster_posts.delete_one({"_id": document["_id"]})
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return post_id
+
+
+def admin_delete_short(post_id: str) -> dict:
+    """Admin path — delete by id without a publish delete_token."""
+    document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
+    if document is None or not document.get("video_id"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
+    caption = str(document.get("caption") or document.get("body") or "")
+    author = str(document.get("shop_name") or document.get("author_name") or "")
+    purge_short_document(document)
+    return {
+        "deleted": True,
+        "post_id": post_id,
+        "author_name": author,
+        "caption": caption[:120],
+    }
