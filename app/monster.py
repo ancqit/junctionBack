@@ -7,14 +7,13 @@ Avoid `from __future__ import annotations`: with FastAPI/slowapi it turns
 UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
 """
 
-import os
 import re
 import secrets
 from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
-from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
@@ -41,8 +40,6 @@ SHORT_AUDIO_MAX_BYTES = 2 * 1024 * 1024
 SHORT_POSTER_MAX_BYTES = 512 * 1024
 SHORT_TTL_DAYS = 30
 SHORT_TTL_SECONDS = SHORT_TTL_DAYS * 24 * 60 * 60
-# Interim moderation key — set on Render to delete by id without admin JWT / publish token.
-MONSTER_MOD_KEY = (os.getenv("MONSTER_MOD_KEY") or "").strip()
 
 ALLOWED_VIDEO_TYPES = {
     "video/mp4": ".mp4",
@@ -151,6 +148,7 @@ class MonsterPost(BaseModel):
     video_id: str
     video_url: str
     playback_url: str = ""
+    download_url: str = ""
     poster_id: str | None = None
     poster_url: str | None = None
     status: Literal["ready", "processing", "failed"] = "ready"
@@ -186,6 +184,10 @@ def _ensure_indexes() -> None:
 
 def _video_url(video_id: str) -> str:
     return f"/monster/shorts/video/{video_id}"
+
+
+def _download_url(post_id: str) -> str:
+    return f"/monster/shorts/{post_id}/download"
 
 
 def _audio_url(audio_id: str) -> str:
@@ -224,12 +226,19 @@ def _parse_byte_range(range_header: str | None, length: int) -> tuple[int, int] 
     return start, end
 
 
-def _stream_grid_file(request: Request, grid_out, *, default_media_type: str, default_filename: str) -> Response:
+def _stream_grid_file(
+    request: Request,
+    grid_out,
+    *,
+    default_media_type: str,
+    default_filename: str,
+    disposition: Literal["inline", "attachment"] = "inline",
+) -> Response:
     length = int(getattr(grid_out, "length", 0) or 0)
     media_type = grid_out.content_type or default_media_type
     filename = grid_out.filename or default_filename
     base_headers = {
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
         "Cache-Control": "public, max-age=86400",
         "Accept-Ranges": "bytes",
     }
@@ -340,6 +349,7 @@ def _serialize(document: dict) -> MonsterPost:
         video_id=video_id,
         video_url=video_url,
         playback_url=video_url,
+        download_url=_download_url(str(document["_id"])) if video_id else "",
         poster_id=poster_id,
         poster_url=_poster_url(poster_id) if poster_id else None,
         status=status_value,  # type: ignore[arg-type]
@@ -543,6 +553,29 @@ def stream_short_video(request: Request, video_id: str) -> Response:
     )
 
 
+@router.get("/shorts/{post_id}/download")
+@limiter.limit(RATE_LIMIT_CATALOG)
+def download_short_video(request: Request, post_id: str) -> Response:
+    """Public download of the short master (attachment) so creators can keep a copy before delete."""
+    document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
+    if document is None or not document.get("video_id"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
+    video_id = str(document.get("video_id") or "").strip()
+    try:
+        grid_out = short_video_fs.get(ObjectId(video_id))
+    except (NoFile, Exception) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found") from exc
+
+    ext = ALLOWED_VIDEO_TYPES.get(grid_out.content_type or "", ".mp4")
+    return _stream_grid_file(
+        request,
+        grid_out,
+        default_media_type="video/mp4",
+        default_filename=f"junction-short-{post_id}{ext}",
+        disposition="attachment",
+    )
+
+
 @router.get("/shorts/poster/{poster_id}")
 @limiter.limit(RATE_LIMIT_CATALOG)
 def stream_short_poster(request: Request, poster_id: str) -> Response:
@@ -649,19 +682,9 @@ def get_monster_post(request: Request, post_id: str, _: CatalogReader) -> Monste
 
 
 class MonsterPostCreated(MonsterPost):
-    """Create response — includes a one-time delete_token for the publisher."""
+    """Create response — includes a one-time delete_token for later profile-bound reclaim."""
 
     delete_token: str
-
-
-class MonsterPostDelete(BaseModel):
-    delete_token: str | None = Field(default=None, max_length=120)
-
-
-def _mod_key_ok(provided: str | None) -> bool:
-    if not MONSTER_MOD_KEY or not provided:
-        return False
-    return secrets.compare_digest(provided.strip(), MONSTER_MOD_KEY)
 
 
 @router.post("/posts", response_model=MonsterPostCreated, status_code=status.HTTP_201_CREATED)
@@ -703,39 +726,13 @@ def create_monster_post(
 def delete_monster_post(
     request: Request,
     post_id: str,
-    payload: MonsterPostDelete,
     _: CatalogReader,
 ) -> Response:
-    """Delete a short using the delete_token returned at publish time."""
-    _ = request
-    document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
-    if document is None or not document.get("video_id"):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
-    stored = str(document.get("delete_token") or "")
-    token = (payload.delete_token or "").strip()
-    if not stored or not token or not secrets.compare_digest(stored, token):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this short")
-    purge_short_document(document)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    """Interim open delete by id — anyone with a catalog session can remove any short.
 
-
-@router.delete("/shorts/{post_id}/mod", status_code=status.HTTP_204_NO_CONTENT)
-@limiter.limit(RATE_LIMIT_AUTH)
-def delete_monster_post_with_mod_key(
-    request: Request,
-    post_id: str,
-    x_monster_mod_key: str | None = Header(default=None, alias="X-Monster-Mod-Key"),
-    mod_key: str | None = Query(default=None, max_length=120),
-) -> Response:
-    """Interim: delete by post id + MONSTER_MOD_KEY only (no admin JWT, no publish token)."""
+    Later: bind delete to profile ownership (phone/shop) and stop open deletes.
+    """
     _ = request
-    if not MONSTER_MOD_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="MONSTER_MOD_KEY is not configured on this server",
-        )
-    if not _mod_key_ok(x_monster_mod_key or mod_key):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid mod key")
     document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
     if document is None or not document.get("video_id"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
