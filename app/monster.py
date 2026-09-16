@@ -173,6 +173,11 @@ def _ensure_indexes() -> None:
     monster_posts.create_index([("shop_id", 1), ("created_at", -1)])
     monster_posts.create_index([("author_kind", 1), ("created_at", -1)])
     monster_posts.create_index([("video_id", 1)])
+    # TTL options are immutable — drop/recreate when SHORT_TTL_DAYS changes.
+    ttl_name = "created_at_1"
+    existing = next((idx for idx in monster_posts.list_indexes() if idx.get("name") == ttl_name), None)
+    if existing is not None and existing.get("expireAfterSeconds") != SHORT_TTL_SECONDS:
+        monster_posts.drop_index(ttl_name)
     monster_posts.create_index("created_at", expireAfterSeconds=SHORT_TTL_SECONDS)
 
 
