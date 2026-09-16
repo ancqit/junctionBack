@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .access_control import require_store_access
 from .database import database, monster_posts, shops
-from .rate_limit import RATE_LIMIT_AUTH, RATE_LIMIT_CATALOG, limiter
+from .rate_limit import RATE_LIMIT_AUTH, RATE_LIMIT_CATALOG, RATE_LIMIT_MEDIA, limiter
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
@@ -40,6 +40,10 @@ SHORT_AUDIO_MAX_BYTES = 2 * 1024 * 1024
 SHORT_POSTER_MAX_BYTES = 512 * 1024
 SHORT_TTL_DAYS = 30
 SHORT_TTL_SECONDS = SHORT_TTL_DAYS * 24 * 60 * 60
+# Cap each Range response so first playable bytes leave the server immediately
+# (browsers re-request the next window). Avoids buffering a full 40MB master.
+SHORT_RANGE_MAX_BYTES = 1 * 1024 * 1024
+SHORT_STREAM_CHUNK_BYTES = 256 * 1024
 
 ALLOWED_VIDEO_TYPES = {
     "video/mp4": ".mp4",
@@ -226,6 +230,18 @@ def _parse_byte_range(range_header: str | None, length: int) -> tuple[int, int] 
     return start, end
 
 
+def _iter_grid_bytes(grid_out, start: int, size: int):
+    """Yield GridFS bytes without loading the whole window into memory."""
+    grid_out.seek(start)
+    remaining = max(0, size)
+    while remaining > 0:
+        chunk = grid_out.read(min(SHORT_STREAM_CHUNK_BYTES, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        yield chunk
+
+
 def _stream_grid_file(
     request: Request,
     grid_out,
@@ -233,27 +249,35 @@ def _stream_grid_file(
     default_media_type: str,
     default_filename: str,
     disposition: Literal["inline", "attachment"] = "inline",
+    cap_range: bool = True,
 ) -> Response:
     length = int(getattr(grid_out, "length", 0) or 0)
     media_type = grid_out.content_type or default_media_type
     filename = grid_out.filename or default_filename
     base_headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "public, max-age=86400, immutable",
         "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
     }
     byte_range = _parse_byte_range(request.headers.get("range"), length)
+
+    # Full-body responses: stream in chunks (never buffer the whole GridFS file).
     if byte_range is None:
         if length:
             base_headers["Content-Length"] = str(length)
-        return StreamingResponse(grid_out, media_type=media_type, headers=base_headers)
+        return StreamingResponse(
+            _iter_grid_bytes(grid_out, 0, length) if length else grid_out,
+            media_type=media_type,
+            headers=base_headers,
+        )
 
     start, end = byte_range
+    if cap_range and (end - start + 1) > SHORT_RANGE_MAX_BYTES:
+        end = start + SHORT_RANGE_MAX_BYTES - 1
     size = end - start + 1
-    grid_out.seek(start)
-    chunk = grid_out.read(size)
-    return Response(
-        content=chunk,
+    return StreamingResponse(
+        _iter_grid_bytes(grid_out, start, size),
         status_code=status.HTTP_206_PARTIAL_CONTENT,
         media_type=media_type,
         headers={
@@ -536,7 +560,7 @@ async def upload_short_poster(
 
 @router.get("/shorts/video/{video_id}")
 @router.get("/posts/video/{video_id}")
-@limiter.limit(RATE_LIMIT_CATALOG)
+@limiter.limit(RATE_LIMIT_MEDIA)
 def stream_short_video(request: Request, video_id: str) -> Response:
     """Public stream with byte-Range so feed players can start immediately."""
     try:
@@ -554,7 +578,7 @@ def stream_short_video(request: Request, video_id: str) -> Response:
 
 
 @router.get("/shorts/{post_id}/download")
-@limiter.limit(RATE_LIMIT_CATALOG)
+@limiter.limit(RATE_LIMIT_MEDIA)
 def download_short_video(request: Request, post_id: str) -> Response:
     """Public download of the short master (attachment) so creators can keep a copy before delete."""
     document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
@@ -573,11 +597,12 @@ def download_short_video(request: Request, post_id: str) -> Response:
         default_media_type="video/mp4",
         default_filename=f"junction-short-{post_id}{ext}",
         disposition="attachment",
+        cap_range=False,
     )
 
 
 @router.get("/shorts/poster/{poster_id}")
-@limiter.limit(RATE_LIMIT_CATALOG)
+@limiter.limit(RATE_LIMIT_MEDIA)
 def stream_short_poster(request: Request, poster_id: str) -> Response:
     """Public poster image for feed cards."""
     try:
@@ -591,11 +616,12 @@ def stream_short_poster(request: Request, poster_id: str) -> Response:
         grid_out,
         default_media_type="image/jpeg",
         default_filename="poster.jpg",
+        cap_range=False,
     )
 
 
 @router.get("/shorts/audio/{audio_id}")
-@limiter.limit(RATE_LIMIT_CATALOG)
+@limiter.limit(RATE_LIMIT_MEDIA)
 def stream_short_audio(request: Request, audio_id: str) -> Response:
     """Public stream for mix tracks under a short."""
     try:
