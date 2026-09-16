@@ -45,9 +45,9 @@ PLAN_CATALOG: dict[str, dict] = {
     PlanType.starter.value: {
         "name": "Starter",
         "price_inr": 999,
-        "max_products": 10,
+        "max_products": 40,
         "profile_only": False,
-        "description": "Shop profile with up to 10 products for 1 year (INR 999)",
+        "description": "Shop profile with up to 40 products for 1 year (INR 999)",
         "duration_days": PLAN_YEAR_DAYS,
     },
     PlanType.serious.value: {
@@ -255,7 +255,7 @@ def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
                 "$set": {
                     "is_locked": True,
                     "lock_reason": "plan_expired",
-                    "plan.status": PlanStatus.expired.value,
+                    "plan.status": PlanStatus.deactivated.value,
                     "plan.viewing_applied": True,
                     "plan.trial_used": True,
                     "updated_at": now,
@@ -332,14 +332,14 @@ def restore_persisted_plan(user: dict) -> dict:
 
 
 def downgrade_owner_to_viewer(user: dict) -> dict:
-    """Move an owner to viewer after trial or grace period ends."""
+    """Move an owner to viewer after trial or grace period ends (deactivated → viewer)."""
     now = utc_now()
     updated = users.find_one_and_update(
         {"_id": user["_id"]},
         {
             "$set": {
                 "role": UserRole.viewer.value,
-                "plan.status": PlanStatus.expired.value,
+                "plan.status": PlanStatus.deactivated.value,
                 "plan.viewing_applied": True,
                 "plan.downgraded_at": now,
                 "plan.closed_at": now,
@@ -848,7 +848,7 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
         {"_id": shop["_id"], "plan.status": PlanStatus.active.value, "plan.type": PlanType.free_trial.value},
         {
             "$set": {
-                "plan.status": PlanStatus.expired.value,
+                "plan.status": PlanStatus.deactivated.value,
                 "plan.expired_at": utc_now(),
                 "plan.viewing_applied": True,
                 "is_locked": True,
@@ -910,7 +910,7 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
         {"_id": shop["_id"], "plan.status": PlanStatus.grace_period.value},
         {
             "$set": {
-                "plan.status": PlanStatus.expired.value,
+                "plan.status": PlanStatus.deactivated.value,
                 "plan.viewing_applied": True,
                 "is_locked": True,
                 "lock_reason": "plan_expired",
