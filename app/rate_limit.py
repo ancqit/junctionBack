@@ -9,5 +9,7 @@ RATE_LIMIT_GUEST_ORDERS = os.getenv("RATE_LIMIT_GUEST_ORDERS", "30/minute")
 RATE_LIMIT_QR = os.getenv("RATE_LIMIT_QR", "30/minute")
 # Public catalog reads (by-city / by-location / product search / shop products)
 RATE_LIMIT_CATALOG = os.getenv("RATE_LIMIT_CATALOG", "60/minute")
+# Shorts media byte streams — browsers fire many Range probes; keep this high.
+RATE_LIMIT_MEDIA = "600/minute"
 
 limiter = Limiter(key_func=get_remote_address)
