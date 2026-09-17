@@ -21,6 +21,8 @@ R2_BUCKET = (os.getenv("R2_BUCKET") or "").strip()
 R2_PUBLIC_BASE_URL = (os.getenv("R2_PUBLIC_BASE_URL") or "").rstrip("/")
 R2_ENDPOINT = (os.getenv("R2_ENDPOINT") or "").strip()
 R2_SIGN_EXPIRES_SECONDS = int(os.getenv("R2_SIGN_EXPIRES_SECONDS") or "600")
+# Long edge cache — shorts are immutable keys (uuid filename).
+R2_CACHE_CONTROL = (os.getenv("R2_CACHE_CONTROL") or "public, max-age=31536000, immutable").strip()
 
 _KEY_RE = re.compile(r"^shorts/[a-zA-Z0-9_-]+\.(mp4|webm|mov|m4a|mp3|wav|aac|jpg|jpeg|png|webp)$")
 
@@ -173,6 +175,37 @@ def new_object_key(kind: MediaKind, content_type: str) -> str:
     if kind == "poster":
         return f"shorts/{token}-poster{ext}"
     return f"shorts/{token}{ext}"
+
+
+def new_playback_key() -> str:
+    """Immutable H.264 feed rendition key (always .mp4)."""
+    return f"shorts/{uuid.uuid4().hex}-playback.mp4"
+
+
+def put_bytes(
+    object_key: str,
+    body: bytes,
+    *,
+    content_type: str,
+    cache_control: str | None = None,
+) -> None:
+    """Server-side PUT (playback encode). Sets long Cache-Control for CDN."""
+    require_r2()
+    key = assert_owned_key(object_key)
+    _client().put_object(
+        Bucket=R2_BUCKET,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+        CacheControl=cache_control or R2_CACHE_CONTROL,
+    )
+
+
+def get_bytes(object_key: str) -> bytes:
+    require_r2()
+    key = assert_owned_key(object_key)
+    response = _client().get_object(Bucket=R2_BUCKET, Key=key)
+    return response["Body"].read()
 
 
 def presign_put(*, kind: MediaKind, content_type: str, filename: str = "") -> dict:

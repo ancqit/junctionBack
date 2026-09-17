@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from gridfs import GridFS
 from gridfs.errors import NoFile
@@ -23,6 +23,7 @@ from .access_control import require_store_access
 from .database import database, monster_posts, shops
 from .rate_limit import RATE_LIMIT_AUTH, RATE_LIMIT_CATALOG, RATE_LIMIT_MEDIA, limiter
 from . import r2_media
+from . import short_playback
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
 
@@ -908,12 +909,14 @@ def create_monster_post(
     request: Request,
     payload: MonsterPostCreate,
     auth: CatalogReader,
+    background_tasks: BackgroundTasks,
 ) -> MonsterPostCreated:
     """
     Publish a Junction (locality) video short.
 
     Upload the clip first via POST /monster/shorts/video/sign (R2) or legacy /shorts/video.
     Optional mix track via /shorts/audio/sign; poster via /shorts/poster/sign.
+    After create, a background job encodes an H.264 `playback_key` for HD feed play.
     """
     _ensure_indexes()
     shop_doc = None
@@ -930,6 +933,9 @@ def create_monster_post(
     document["delete_token"] = delete_token
     result = monster_posts.insert_one(document)
     document["_id"] = result.inserted_id
+    post_id = str(result.inserted_id)
+    # Giants serve a dedicated progressive H.264 rendition from CDN — encode off-request.
+    background_tasks.add_task(short_playback.ensure_playback_for_post, post_id)
     created = _serialize(document)
     return MonsterPostCreated(**created.model_dump(), delete_token=delete_token)
 
