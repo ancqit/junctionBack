@@ -420,7 +420,7 @@ def _serialize(document: dict) -> MonsterPost:
 
     hls = ""
     if stream_uid and cf_stream.stream_configured():
-        hls = cf_stream.hls_url(stream_uid)
+        hls = str(document.get("stream_hls_url") or "").strip() or cf_stream.hls_url(stream_uid)
         video_url = hls
     elif playback_key:
         video_url = r2_media.public_url(playback_key)
@@ -435,7 +435,11 @@ def _serialize(document: dict) -> MonsterPost:
     elif poster_id:
         poster_url = _poster_url(poster_id)
     elif stream_uid and cf_stream.stream_configured():
-        poster_url = cf_stream.thumbnail_url(stream_uid)
+        poster_url = (
+            str(document.get("stream_thumbnail_url") or "").strip()
+            or cf_stream.thumbnail_url(stream_uid)
+            or None
+        )
     else:
         poster_url = None
 
