@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from .access_control import require_store_access
 from .database import database, monster_posts, shops
 from .rate_limit import RATE_LIMIT_AUTH, RATE_LIMIT_CATALOG, RATE_LIMIT_MEDIA, limiter
+from . import cf_stream
 from . import r2_media
 from . import short_playback
 from .session import CatalogReader, is_junction_session
@@ -106,16 +107,22 @@ class MonsterSignRequest(BaseModel):
 
 class MonsterSignResponse(BaseModel):
     kind: str
-    object_key: str
+    object_key: str = ""
     upload_url: str
-    public_url: str
-    content_type: str
+    public_url: str = ""
+    content_type: str = ""
     expires_in: int
     max_bytes: int
     # Compat aliases so older clients can treat the key like an upload id.
     video_id: str = ""
     audio_id: str = ""
     poster_id: str = ""
+    # Cloudflare Stream direct upload (multipart POST) when configured.
+    provider: Literal["r2", "stream", "gridfs"] = "r2"
+    upload_method: Literal["PUT", "POST"] = "PUT"
+    stream_uid: str = ""
+    hls_url: str = ""
+    thumbnail_url: str = ""
 
 
 class MonsterPostCreate(BaseModel):
@@ -133,6 +140,7 @@ class MonsterPostCreate(BaseModel):
     shop_id: str | None = Field(default=None, max_length=80)
     video_id: str = Field(default="", max_length=80)
     video_key: str = Field(default="", max_length=200)
+    stream_uid: str = Field(default="", max_length=80)
     audio_id: str | None = Field(default=None, max_length=80)
     audio_key: str | None = Field(default=None, max_length=200)
     poster_id: str | None = Field(default=None, max_length=80)
@@ -150,6 +158,7 @@ class MonsterPostCreate(BaseModel):
         "shop_id",
         "video_id",
         "video_key",
+        "stream_uid",
         "audio_id",
         "audio_key",
         "poster_id",
@@ -165,8 +174,8 @@ class MonsterPostCreate(BaseModel):
 
     @model_validator(mode="after")
     def require_video_ref(self) -> "MonsterPostCreate":
-        if not (self.video_key or self.video_id):
-            raise ValueError("video_key or video_id is required")
+        if not (self.video_key or self.video_id or self.stream_uid):
+            raise ValueError("video_key, video_id, or stream_uid is required")
         return self
 
 
@@ -184,6 +193,7 @@ class MonsterPost(BaseModel):
     shop_name: str | None = None
     video_id: str = ""
     video_key: str = ""
+    stream_uid: str = ""
     video_url: str
     playback_url: str = ""
     download_url: str = ""
@@ -197,6 +207,7 @@ class MonsterPost(BaseModel):
     track_name: str = ""
     duration_seconds: int = 15
     created_at: datetime
+    hls_url: str = ""
 
 
 class MonsterPostList(BaseModel):
@@ -382,6 +393,8 @@ def _assert_poster_exists(poster_id: str) -> ObjectId:
 def _has_video(document: dict | None) -> bool:
     if not document:
         return False
+    if str(document.get("stream_uid") or "").strip():
+        return True
     if str(document.get("video_key") or "").strip():
         return True
     return bool(str(document.get("video_id") or "").strip())
@@ -396,6 +409,7 @@ def _serialize(document: dict) -> MonsterPost:
     caption = str(document.get("caption") or document.get("body") or "")
     video_id = str(document.get("video_id") or "")
     video_key = str(document.get("video_key") or "").strip()
+    stream_uid = str(document.get("stream_uid") or "").strip()
     playback_key = str(document.get("playback_key") or "").strip()
     playback_video_id = str(document.get("playback_video_id") or "").strip()
     audio_id = (str(document["audio_id"]).strip() or None) if document.get("audio_id") else None
@@ -404,7 +418,11 @@ def _serialize(document: dict) -> MonsterPost:
     poster_key = (str(document["poster_key"]).strip() or None) if document.get("poster_key") else None
     city = str(document.get("city") or "").strip()
 
-    if playback_key:
+    hls = ""
+    if stream_uid and cf_stream.stream_configured():
+        hls = cf_stream.hls_url(stream_uid)
+        video_url = hls
+    elif playback_key:
         video_url = r2_media.public_url(playback_key)
     elif video_key:
         video_url = r2_media.public_url(video_key)
@@ -416,6 +434,8 @@ def _serialize(document: dict) -> MonsterPost:
         poster_url = r2_media.public_url(poster_key)
     elif poster_id:
         poster_url = _poster_url(poster_id)
+    elif stream_uid and cf_stream.stream_configured():
+        poster_url = cf_stream.thumbnail_url(stream_uid)
     else:
         poster_url = None
 
@@ -429,7 +449,7 @@ def _serialize(document: dict) -> MonsterPost:
     status_value = str(document.get("status") or "ready")
     if status_value not in {"ready", "processing", "failed"}:
         status_value = "ready"
-    has_media = bool(video_key or video_id)
+    has_media = bool(stream_uid or video_key or video_id)
     return MonsterPost(
         id=str(document["_id"]),
         author_name=author_name,
@@ -442,8 +462,9 @@ def _serialize(document: dict) -> MonsterPost:
         author_kind=author_kind,
         shop_id=(str(document["shop_id"]).strip() or None) if document.get("shop_id") else None,
         shop_name=shop_name,
-        video_id=video_id or video_key,
+        video_id=video_id or video_key or stream_uid,
         video_key=video_key,
+        stream_uid=stream_uid,
         video_url=video_url,
         playback_url=video_url,
         download_url=_download_url(str(document["_id"])) if has_media else "",
@@ -457,6 +478,7 @@ def _serialize(document: dict) -> MonsterPost:
         track_name=str(document.get("track_name") or ""),
         duration_seconds=int(document.get("duration_seconds") or 15),
         created_at=document.get("created_at") or datetime.now(timezone.utc),
+        hls_url=hls,
     )
 
 
@@ -473,13 +495,25 @@ def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None)
 
     video_key = (payload.video_key or "").strip()
     video_id = (payload.video_id or "").strip()
-    if video_key:
+    stream_uid = (payload.stream_uid or "").strip()
+    if stream_uid:
+        if not cf_stream.stream_configured():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="stream_uid provided but Cloudflare Stream is not configured",
+            )
+        video_key = ""
+        video_id = ""
+    elif video_key:
         video_key = r2_media.assert_owned_key(video_key)
         video_id = ""
     elif video_id:
         _assert_video_exists(video_id)
     else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="video_key or video_id is required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="video_key, video_id, or stream_uid is required",
+        )
 
     audio_key = (payload.audio_key or "").strip() or None
     audio_id = (payload.audio_id or "").strip() or None
@@ -506,9 +540,11 @@ def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None)
         "locality": locality,
         "author_kind": payload.author_kind,
         "duration_seconds": payload.duration_seconds,
-        "status": "ready",
+        "status": "processing" if stream_uid else "ready",
         "created_at": now,
     }
+    if stream_uid:
+        document["stream_uid"] = stream_uid
     if video_key:
         document["video_key"] = video_key
     if video_id:
@@ -546,8 +582,25 @@ def sign_short_video_upload(
     payload: MonsterSignRequest,
     auth: CatalogReader,
 ) -> MonsterSignResponse:
-    """Mint a short-lived R2 PUT URL so the browser uploads video bytes directly."""
+    """Mint a short-lived upload URL — Cloudflare Stream (ABR) when configured, else R2 PUT."""
     _ = request, auth
+    if cf_stream.stream_configured():
+        signed = cf_stream.create_direct_upload(max_duration_seconds=SHORT_DURATION_MAX_SEC)
+        return MonsterSignResponse(
+            kind="video",
+            object_key=signed["uid"],
+            upload_url=signed["upload_url"],
+            public_url=signed["hls_url"],
+            content_type=payload.content_type or "video/mp4",
+            expires_in=signed["expires_in"],
+            max_bytes=SHORT_VIDEO_MAX_BYTES,
+            video_id=signed["uid"],
+            provider="stream",
+            upload_method="POST",
+            stream_uid=signed["uid"],
+            hls_url=signed["hls_url"],
+            thumbnail_url=signed["thumbnail_url"],
+        )
     signed = r2_media.presign_put(
         kind="video",
         content_type=payload.content_type,
@@ -557,6 +610,8 @@ def sign_short_video_upload(
         **signed,
         max_bytes=SHORT_VIDEO_MAX_BYTES,
         video_id=signed["object_key"],
+        provider="r2",
+        upload_method="PUT",
     )
 
 
@@ -934,8 +989,13 @@ def create_monster_post(
     result = monster_posts.insert_one(document)
     document["_id"] = result.inserted_id
     post_id = str(result.inserted_id)
-    # Giants serve a dedicated progressive H.264 rendition from CDN — encode off-request.
-    background_tasks.add_task(short_playback.ensure_playback_for_post, post_id)
+    stream_uid = str(document.get("stream_uid") or "").strip()
+    if stream_uid:
+        # Cloudflare Stream packages ABR (360p–1080p) — poll until readyToStream.
+        background_tasks.add_task(cf_stream.wait_until_ready_for_post, post_id, stream_uid)
+    else:
+        # R2/GridFS path: encode a dedicated H.264 playback_key for HD feed play.
+        background_tasks.add_task(short_playback.ensure_playback_for_post, post_id)
     created = _serialize(document)
     return MonsterPostCreated(**created.model_dump(), delete_token=delete_token)
 
@@ -961,8 +1021,9 @@ def delete_monster_post(
 
 
 def purge_short_document(document: dict) -> str:
-    """Remove a short row and its R2 / GridFS blobs. Returns the post id."""
+    """Remove a short row and its Stream / R2 / GridFS blobs. Returns the post id."""
     post_id = str(document["_id"])
+    cf_stream.delete_video(str(document.get("stream_uid") or ""))
     for key_field in ("video_key", "playback_key", "audio_key", "poster_key"):
         r2_media.delete_object(str(document.get(key_field) or ""))
     video_id = str(document.get("video_id") or "").strip()
