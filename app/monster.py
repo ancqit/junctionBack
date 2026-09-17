@@ -547,7 +547,11 @@ def sign_short_video_upload(
 ) -> MonsterSignResponse:
     """Mint a short-lived R2 PUT URL so the browser uploads video bytes directly."""
     _ = request, auth
-    signed = r2_media.presign_put(kind="video", content_type=payload.content_type)
+    signed = r2_media.presign_put(
+        kind="video",
+        content_type=payload.content_type,
+        filename=payload.filename,
+    )
     return MonsterSignResponse(
         **signed,
         max_bytes=SHORT_VIDEO_MAX_BYTES,
@@ -563,7 +567,11 @@ def sign_short_audio_upload(
     auth: CatalogReader,
 ) -> MonsterSignResponse:
     _ = request, auth
-    signed = r2_media.presign_put(kind="audio", content_type=payload.content_type)
+    signed = r2_media.presign_put(
+        kind="audio",
+        content_type=payload.content_type,
+        filename=payload.filename,
+    )
     return MonsterSignResponse(
         **signed,
         max_bytes=SHORT_AUDIO_MAX_BYTES,
@@ -579,7 +587,11 @@ def sign_short_poster_upload(
     auth: CatalogReader,
 ) -> MonsterSignResponse:
     _ = request, auth
-    signed = r2_media.presign_put(kind="poster", content_type=payload.content_type)
+    signed = r2_media.presign_put(
+        kind="poster",
+        content_type=payload.content_type,
+        filename=payload.filename,
+    )
     return MonsterSignResponse(
         **signed,
         max_bytes=SHORT_POSTER_MAX_BYTES,

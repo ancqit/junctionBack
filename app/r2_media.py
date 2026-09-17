@@ -45,6 +45,54 @@ _KIND_EXTS = {
     },
 }
 
+_CONTENT_TYPE_ALIASES = {
+    "video/x-matroska": "video/webm",
+    "video/mkv": "video/webm",
+    "application/mp4": "video/mp4",
+    "audio/mp3": "audio/mpeg",
+    "audio/x-m4a": "audio/mp4",
+    "image/jpg": "image/jpeg",
+}
+
+
+def normalize_content_type(kind: MediaKind, content_type: str, filename: str = "") -> str:
+    """Map aliases / empty browser types onto the canonical R2 Content-Type."""
+    raw = (content_type or "").split(";")[0].strip().lower()
+    if raw in _CONTENT_TYPE_ALIASES:
+        raw = _CONTENT_TYPE_ALIASES[raw]
+    if raw in _KIND_EXTS[kind]:
+        return raw
+    name = (filename or "").strip().lower()
+    if kind == "video":
+        if name.endswith(".webm"):
+            return "video/webm"
+        if name.endswith(".mov"):
+            return "video/quicktime"
+        if name.endswith(".mp4") or name.endswith(".m4v"):
+            return "video/mp4"
+    if kind == "audio":
+        if name.endswith(".mp3"):
+            return "audio/mpeg"
+        if name.endswith(".m4a"):
+            return "audio/mp4"
+        if name.endswith(".aac"):
+            return "audio/aac"
+        if name.endswith(".wav"):
+            return "audio/wav"
+        if name.endswith(".webm"):
+            return "audio/webm"
+    if kind == "poster":
+        if name.endswith(".png"):
+            return "image/png"
+        if name.endswith(".webp"):
+            return "image/webp"
+        if name.endswith(".jpg") or name.endswith(".jpeg"):
+            return "image/jpeg"
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Unsupported {kind} content type",
+    )
+
 
 def r2_configured() -> bool:
     return bool(
@@ -109,14 +157,9 @@ def new_object_key(kind: MediaKind, content_type: str) -> str:
     return f"shorts/{token}{ext}"
 
 
-def presign_put(*, kind: MediaKind, content_type: str) -> dict:
+def presign_put(*, kind: MediaKind, content_type: str, filename: str = "") -> dict:
     require_r2()
-    content_type = (content_type or "").split(";")[0].strip().lower()
-    if content_type not in _KIND_EXTS[kind]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported {kind} content type",
-        )
+    content_type = normalize_content_type(kind, content_type, filename)
     object_key = new_object_key(kind, content_type)
     upload_url = _client().generate_presigned_url(
         "put_object",
