@@ -99,9 +99,14 @@ for _router in _routers:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, str | bool]:
     """Liveness probe for Render / load balancers. No auth. Prefer this over /docs."""
-    return {"status": "ok"}
+    from . import r2_media
+
+    return {
+        "status": "ok",
+        "r2_configured": r2_media.r2_configured(),
+    }
 
 
 class ItemCreate(BaseModel):

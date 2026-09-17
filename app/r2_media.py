@@ -105,11 +105,29 @@ def r2_configured() -> bool:
     )
 
 
+def r2_missing_env() -> list[str]:
+    missing: list[str] = []
+    if not R2_ACCOUNT_ID:
+        missing.append("R2_ACCOUNT_ID")
+    if not R2_ACCESS_KEY_ID:
+        missing.append("R2_ACCESS_KEY_ID")
+    if not R2_SECRET_ACCESS_KEY:
+        missing.append("R2_SECRET_ACCESS_KEY")
+    if not R2_BUCKET:
+        missing.append("R2_BUCKET")
+    if not R2_PUBLIC_BASE_URL:
+        missing.append("R2_PUBLIC_BASE_URL")
+    if not R2_ENDPOINT and not R2_ACCOUNT_ID:
+        missing.append("R2_ENDPOINT")
+    return missing
+
+
 def require_r2() -> None:
     if not r2_configured():
+        missing = ", ".join(r2_missing_env()) or "R2_*"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="R2 media storage is not configured on this server",
+            detail=f"R2 media storage is not configured on this server (missing {missing})",
         )
 
 
