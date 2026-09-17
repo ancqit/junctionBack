@@ -591,7 +591,12 @@ def admin_list_shorts(
     from .database import monster_posts
     from .monster import _serialize
 
-    query: dict = {"video_id": {"$exists": True, "$ne": ""}}
+    query: dict = {
+        "$or": [
+            {"video_key": {"$exists": True, "$nin": [None, ""]}},
+            {"video_id": {"$exists": True, "$ne": ""}},
+        ]
+    }
     if city and city.strip():
         query["city"] = {"$regex": f"^{city.strip()}$", "$options": "i"}
     if locality and locality.strip():
