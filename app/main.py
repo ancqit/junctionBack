@@ -101,12 +101,14 @@ for _router in _routers:
 @app.get("/health")
 def health() -> dict[str, str | bool]:
     """Liveness probe for Render / load balancers. No auth. Prefer this over /docs."""
+    from . import cf_stream
     from . import r2_media
     from . import short_playback
 
     return {
         "status": "ok",
         "r2_configured": r2_media.r2_configured(),
+        "stream_configured": cf_stream.stream_configured(),
         "ffmpeg": short_playback.ffmpeg_available(),
     }
 
