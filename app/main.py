@@ -17,7 +17,7 @@ from .access_control import AuthenticatedUser
 from .cors_config import load_cors_origins
 from .database import items
 from .admin import router as admin_router
-from .digilocker import router as digilocker_router
+from .aadhaar import router as aadhaar_router
 from .employees import router as employees_router
 from .locations import router as locations_router
 from .login import router as login_router
@@ -72,7 +72,7 @@ _routers = (
     catalog_contacts_router,
     fx_rates_router,
     session_router,
-    digilocker_router,
+    aadhaar_router,
     profile_router,
     notices_router,
     products_router,

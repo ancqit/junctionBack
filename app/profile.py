@@ -30,6 +30,9 @@ class Profile(BaseModel):
     avatar_url: str | None
     digilocker_verified: bool = False
     digilocker_name: str | None = None
+    aadhaar_verified: bool = False
+    aadhaar_last4: str | None = None
+    aadhaar_name: str | None = None
     gstin: str | None = None
     gst_verified: bool = False
     gst_legal_name: str | None = None
@@ -91,6 +94,9 @@ def serialize_profile(user: dict, shop: dict | None = None) -> Profile:
     if shop is not None:
         digilocker_verified = bool(shop.get("digilocker_verified", False))
         digilocker_name = _strip_optional(shop.get("digilocker_name"))
+        aadhaar_verified = bool(shop.get("aadhaar_verified", False)) or digilocker_verified
+        aadhaar_last4 = _strip_optional(shop.get("aadhaar_last4"))
+        aadhaar_name = _strip_optional(shop.get("aadhaar_name")) or digilocker_name
         gst_verified = bool(shop.get("gst_verified", False))
         gstin = _strip_optional(shop.get("gstin"))
         gst_legal_name = _strip_optional(shop.get("gst_legal_name"))
@@ -100,6 +106,9 @@ def serialize_profile(user: dict, shop: dict | None = None) -> Profile:
     else:
         digilocker_verified = bool(user.get("digilocker_verified", False))
         digilocker_name = _strip_optional(user.get("digilocker_name"))
+        aadhaar_verified = bool(user.get("aadhaar_verified", False)) or digilocker_verified
+        aadhaar_last4 = _strip_optional(user.get("aadhaar_last4"))
+        aadhaar_name = _strip_optional(user.get("aadhaar_name")) or digilocker_name
         gst_verified = bool(user.get("gst_verified", False))
         gstin = _strip_optional(user.get("gstin"))
         gst_legal_name = _strip_optional(user.get("gst_legal_name"))
@@ -116,6 +125,9 @@ def serialize_profile(user: dict, shop: dict | None = None) -> Profile:
         avatar_url=avatar_url,
         digilocker_verified=digilocker_verified,
         digilocker_name=digilocker_name,
+        aadhaar_verified=aadhaar_verified,
+        aadhaar_last4=aadhaar_last4,
+        aadhaar_name=aadhaar_name,
         gstin=gstin,
         gst_verified=gst_verified,
         gst_legal_name=gst_legal_name,
