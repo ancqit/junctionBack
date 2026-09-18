@@ -28,6 +28,7 @@ from . import r2_media
 from . import short_playback
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
+from .monster_profiles import OptionalMonsterProfile, MonsterProfileAuth
 
 router = APIRouter(prefix="/monster", tags=["monster"])
 
@@ -192,6 +193,8 @@ class MonsterPost(BaseModel):
     author_kind: MonsterAuthorKind = "person"
     shop_id: str | None = None
     shop_name: str | None = None
+    profile_id: str | None = None
+    profile_name: str | None = None
     video_id: str = ""
     video_key: str = ""
     stream_uid: str = ""
@@ -467,6 +470,8 @@ def _serialize(document: dict) -> MonsterPost:
         author_kind=author_kind,
         shop_id=(str(document["shop_id"]).strip() or None) if document.get("shop_id") else None,
         shop_name=shop_name,
+        profile_id=(str(document["profile_id"]).strip() or None) if document.get("profile_id") else None,
+        profile_name=(str(document["profile_name"]).strip() or None) if document.get("profile_name") else None,
         video_id=video_id or video_key or stream_uid,
         video_key=video_key,
         stream_uid=stream_uid,
@@ -487,7 +492,12 @@ def _serialize(document: dict) -> MonsterPost:
     )
 
 
-def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None) -> dict:
+def _create_short_document(
+    payload: MonsterPostCreate,
+    *,
+    shop_doc: dict | None,
+    profile: dict | None = None,
+) -> dict:
     # Creates are Junction (locality) scoped — city/global are for viewing feeds only.
     scope: MonsterScope = "locality"
     city, locality = _require_place(scope, payload.city, payload.locality)
@@ -575,7 +585,12 @@ def _create_short_document(payload: MonsterPostCreate, *, shop_doc: dict | None)
         if shop_name:
             document["shop_name"] = shop_name
     else:
-        document["author_name"] = payload.author_name
+        if profile is not None:
+            document["profile_id"] = str(profile["_id"])
+            document["profile_name"] = str(profile.get("profile_name") or "").strip() or None
+            document["author_name"] = str(profile.get("name") or payload.author_name).strip()
+        else:
+            document["author_name"] = payload.author_name
 
     return document
 
@@ -981,6 +996,7 @@ def create_monster_post(
     payload: MonsterPostCreate,
     auth: CatalogReader,
     background_tasks: BackgroundTasks,
+    profile: OptionalMonsterProfile,
 ) -> MonsterPostCreated:
     """
     Publish a Junction (locality) video short.
@@ -988,6 +1004,7 @@ def create_monster_post(
     Upload the clip first via POST /monster/shorts/video/sign (R2) or legacy /shorts/video.
     Optional mix track via /shorts/audio/sign; poster via /shorts/poster/sign.
     After create, a background job encodes an H.264 `playback_key` for HD feed play.
+    When a monster profile Bearer token is present, the short is owned by that profile.
     """
     _ensure_indexes()
     shop_doc = None
@@ -999,7 +1016,7 @@ def create_monster_post(
         if not is_junction_session(auth):
             require_store_access(auth["user"], shop_id)
 
-    document = _create_short_document(payload, shop_doc=shop_doc)
+    document = _create_short_document(payload, shop_doc=shop_doc, profile=profile)
     delete_token = secrets.token_urlsafe(24)
     document["delete_token"] = delete_token
     result = monster_posts.insert_one(document)
@@ -1007,13 +1024,29 @@ def create_monster_post(
     post_id = str(result.inserted_id)
     stream_uid = str(document.get("stream_uid") or "").strip()
     if stream_uid:
-        # Cloudflare Stream packages ABR (360p–1080p) — poll until readyToStream.
         background_tasks.add_task(cf_stream.wait_until_ready_for_post, post_id, stream_uid)
     else:
-        # R2/GridFS path: encode a dedicated H.264 playback_key for HD feed play.
         background_tasks.add_task(short_playback.ensure_playback_for_post, post_id)
     created = _serialize(document)
     return MonsterPostCreated(**created.model_dump(), delete_token=delete_token)
+
+
+@router.get("/shorts/mine", response_model=MonsterPostList)
+@limiter.limit(RATE_LIMIT_AUTH)
+def list_my_shorts(
+    request: Request,
+    profile: MonsterProfileAuth,
+    limit: int = Query(default=30, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+) -> MonsterPostList:
+    """Shorts owned by the authenticated monster profile."""
+    _ = request
+    _ensure_indexes()
+    query = {"profile_id": str(profile["_id"])}
+    total = monster_posts.count_documents(query)
+    cursor = monster_posts.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    posts = [_serialize(doc) for doc in cursor if _has_video(doc)]
+    return MonsterPostList(total=total, posts=posts)
 
 
 @router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1022,16 +1055,19 @@ def create_monster_post(
 def delete_monster_post(
     request: Request,
     post_id: str,
-    _: CatalogReader,
+    profile: MonsterProfileAuth,
 ) -> Response:
-    """Interim open delete by id — anyone with a catalog session can remove any short.
-
-    Later: bind delete to profile ownership (phone/shop) and stop open deletes.
-    """
+    """Delete a short you own (monster profile Bearer required)."""
     _ = request
     document = monster_posts.find_one({"_id": parse_object_id(post_id, "Post")})
     if document is None or not _has_video(document):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short not found")
+    owner = str(document.get("profile_id") or "").strip()
+    if not owner or owner != str(profile["_id"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete your own shorts",
+        )
     purge_short_document(document)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

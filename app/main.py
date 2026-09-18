@@ -41,6 +41,7 @@ from .blog import router as blog_router
 from .blog_auth import router as blog_auth_router
 from .gst import router as gst_router
 from .monster import router as monster_router
+from .monster_profiles import router as monster_profiles_router
 from .qr import router as qr_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
@@ -91,6 +92,7 @@ _routers = (
     blog_auth_router,
     gst_router,
     monster_router,
+    monster_profiles_router,
     qr_router,
 )
 for _router in _routers:
