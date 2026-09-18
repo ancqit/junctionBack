@@ -1,8 +1,12 @@
-"""Simple Aadhaar verification (checksum + last-4 storage).
+"""Aadhaar number check (local Verhoeff checksum + last-4 storage).
 
-Replaces DigiLocker OAuth for profile completeness. We validate the 12-digit
-number with the Verhoeff algorithm, store only the last 4 digits, and never
-persist the full Aadhaar.
+This does **not** call UIDAI, DigiLocker, or any third-party KYC API. It only:
+  1. Validates the 12-digit number with the Verhoeff checksum algorithm
+  2. Stores `aadhaar_verified=true` and the last 4 digits on the shop
+
+GST verification is different — it hits the public GST portal. Real Aadhaar KYC
+(OTP / eKYC) requires a licensed UIDAI partner; DigiLocker OAuth was that path
+and is currently unmounted.
 """
 
 from __future__ import annotations
@@ -129,6 +133,6 @@ def verify_aadhaar(
         aadhaar_verified=True,
         aadhaar_last4=last4,
         aadhaar_name=name,
-        message="Aadhaar verified. Only the last 4 digits are stored.",
+        message="Aadhaar number checksum OK. Only the last 4 digits are stored (no UIDAI / DigiLocker API call).",
         shop_id=shop_id,
     )

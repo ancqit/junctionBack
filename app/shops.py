@@ -259,6 +259,8 @@ class Shop(BaseModel):
     avatar_url: str | None = None
     # Owner DigiLocker / gov-ID verification (shop-scoped; owner fallback for legacy).
     digilocker_verified: bool = False
+    # Aadhaar checksum verification (shop-scoped). DigiLocker legacy also counts as ID verified.
+    aadhaar_verified: bool = False
     # GSTIN verification via public GST portal (shop-scoped; owner fallback for legacy).
     gst_verified: bool = False
     # Viewer mode: manual owner toggle or automatic when plan expires.
@@ -357,6 +359,8 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         owner_bio=owner_bio,
         avatar_url=avatar_url,
         digilocker_verified=bool(document.get("digilocker_verified", False)),
+        aadhaar_verified=bool(document.get("aadhaar_verified", False))
+        or bool(document.get("digilocker_verified", False)),
         gst_verified=bool(document.get("gst_verified", False)),
         is_locked=bool(document.get("is_locked", False)),
         lock_reason=_normalize_lock_reason(document.get("lock_reason"), bool(document.get("is_locked", False))),

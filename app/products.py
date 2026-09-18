@@ -449,6 +449,7 @@ class CityShopMatch(BaseModel):
     shop_type_label: str | None = None
     avatar_url: str | None = None
     digilocker_verified: bool = False
+    aadhaar_verified: bool = False
     gst_verified: bool = False
     currency: str = "INR"
     matched_products: list[CityProductMatch] = Field(default_factory=list)
@@ -582,6 +583,7 @@ def search_city_products(
         "shop_type": 1,
         "avatar_url": 1,
         "digilocker_verified": 1,
+        "aadhaar_verified": 1,
         "gst_verified": 1,
         "currency": 1,
     }
@@ -690,6 +692,8 @@ def search_city_products(
                 shop_type_label=None,
                 avatar_url=avatar,
                 digilocker_verified=bool(shop_doc.get("digilocker_verified", False)),
+                aadhaar_verified=bool(shop_doc.get("aadhaar_verified", False))
+                or bool(shop_doc.get("digilocker_verified", False)),
                 gst_verified=bool(shop_doc.get("gst_verified", False)),
                 currency=(
                     str(shop_doc.get("currency") or "INR").strip().upper()
