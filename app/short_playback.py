@@ -21,8 +21,7 @@ from .database import database, monster_posts
 
 logger = logging.getLogger(__name__)
 
-# Phone-HD vertical — sharp on modern screens, still starts fast on CDN.
-# Letterbox into this frame; never cover-crop (WYSIWYG: what you shoot is what we keep).
+# Phone-HD vertical short frame — fill 9:16 (cover-crop). Letterbox looked horizontal.
 PLAYBACK_WIDTH = 720
 PLAYBACK_HEIGHT = 1280
 MAX_HEIGHT = PLAYBACK_HEIGHT
@@ -58,8 +57,8 @@ def encode_lean_file(src: Path, dest: Path) -> None:
         str(src),
         "-vf",
         (
-            f"scale={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"scale={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT},"
             "setsar=1"
         ),
         "-c:v",
