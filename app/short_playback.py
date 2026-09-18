@@ -22,7 +22,10 @@ from .database import database, monster_posts
 logger = logging.getLogger(__name__)
 
 # Phone-HD vertical — sharp on modern screens, still starts fast on CDN.
-MAX_HEIGHT = 1280
+# Letterbox into this frame; never cover-crop (WYSIWYG: what you shoot is what we keep).
+PLAYBACK_WIDTH = 720
+PLAYBACK_HEIGHT = 1280
+MAX_HEIGHT = PLAYBACK_HEIGHT
 VIDEO_BITRATE = "2800k"
 VIDEO_MAXRATE = "3500k"
 VIDEO_BUFSIZE = "5000k"
@@ -54,7 +57,11 @@ def encode_lean_file(src: Path, dest: Path) -> None:
         "-i",
         str(src),
         "-vf",
-        f"scale=-2:'min({MAX_HEIGHT},ih)'",
+        (
+            f"scale={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={PLAYBACK_WIDTH}:{PLAYBACK_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
+            "setsar=1"
+        ),
         "-c:v",
         "libx264",
         "-preset",
