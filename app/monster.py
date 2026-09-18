@@ -7,6 +7,7 @@ Avoid `from __future__ import annotations`: with FastAPI/slowapi it turns
 UploadFile into ForwardRef and crashes app startup (see catalog_otp.py).
 """
 
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -586,9 +587,15 @@ def sign_short_video_upload(
     payload: MonsterSignRequest,
     auth: CatalogReader,
 ) -> MonsterSignResponse:
-    """Mint a short-lived upload URL — Cloudflare Stream (ABR) when configured, else R2 PUT."""
+    """Mint a short-lived upload URL.
+
+    Default: R2 PUT (stable through Cloudflare). Stream ABR is opt-in via
+    STREAM_PREFERRED=1 — Stream-first uploads were returning incomplete
+    origin responses for many clients.
+    """
     _ = request, auth
-    if cf_stream.stream_configured():
+    prefer_stream = (os.getenv("STREAM_PREFERRED") or "").strip().lower() in ("1", "true", "yes")
+    if prefer_stream and cf_stream.stream_configured():
         signed = cf_stream.create_direct_upload(max_duration_seconds=SHORT_DURATION_MAX_SEC)
         return MonsterSignResponse(
             kind="video",
@@ -604,6 +611,11 @@ def sign_short_video_upload(
             stream_uid=signed["uid"],
             hls_url=signed["hls_url"],
             thumbnail_url=signed["thumbnail_url"],
+        )
+    if not r2_media.r2_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="R2 is not configured — set R2_* env (or STREAM_PREFERRED=1 for Stream)",
         )
     signed = r2_media.presign_put(
         kind="video",
