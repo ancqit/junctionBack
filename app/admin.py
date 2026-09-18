@@ -17,11 +17,14 @@ from .plan_applications import PlanApplication, serialize_application
 from .plan_service import (
     PlanStatus,
     PlanType,
+    VIEWER_CLOSE_DAYS,
     admin_activate_viewer_from_waitlist,
     admin_delete_users,
     build_plan_summary,
+    close_storefront_if_viewer_due,
     select_plan_for_shop,
     select_plan_for_user,
+    viewer_mode_started_at,
 )
 from .platform import PLATFORM_LABELS, Platform, normalize_platform
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
@@ -57,6 +60,10 @@ class AdminShopBrief(BaseModel):
     plan_name: str | None = None
     is_locked: bool = False
     lock_reason: str | None = None
+    is_open: bool = True
+    days_in_viewer: int | None = None
+    closes_in_days: int | None = None
+    closed_for_viewer: bool = False
 
 
 class AdminUserRecord(BaseModel):
@@ -91,6 +98,26 @@ class ViewerRecord(BaseModel):
     plan_type: PlanType
     plan_status: PlanStatus
     days_remaining: int | None = None
+    shop_count: int = 0
+    shops: list[AdminShopBrief] = Field(default_factory=list)
+    days_in_viewer: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OwnerRecord(BaseModel):
+    id: str
+    display_name: str
+    email: EmailStr | None = None
+    phone_number: str | None = None
+    account_status: str
+    plan_type: PlanType
+    plan_status: PlanStatus
+    plan_is_active: bool
+    plan_name: str
+    days_remaining: int | None = None
+    shop_count: int = 0
+    shops: list[AdminShopBrief] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -145,12 +172,29 @@ class AdminRegistryResponse(BaseModel):
     file_path: str
 
 
+def _shop_viewer_days(document: dict) -> tuple[int | None, int | None, bool]:
+    """Return (days_in_viewer, closes_in_days, closed_for_viewer)."""
+    document = close_storefront_if_viewer_due(document)
+    started = viewer_mode_started_at(document)
+    closed = document.get("is_open") is False and (
+        bool((document.get("plan") or {}).get("viewing_applied"))
+        or document.get("lock_reason") == "plan_expired"
+        or document.get("closed_for_viewer_at") is not None
+    )
+    if started is None:
+        return None, None, closed
+    elapsed = max(0, (datetime.now(timezone.utc) - started).days)
+    remaining = max(0, VIEWER_CLOSE_DAYS - elapsed) if not closed else 0
+    return elapsed, remaining, closed
+
+
 def _shop_briefs_by_owner(owner_ids: set[str]) -> dict[str, list[AdminShopBrief]]:
     if not owner_ids:
         return {}
     result: dict[str, list[AdminShopBrief]] = {owner_id: [] for owner_id in owner_ids}
     for document in shops.find({"owner_user_id": {"$in": list(owner_ids)}}).sort("created_at", -1):
         owner_id = str(document.get("owner_user_id") or "")
+        document = close_storefront_if_viewer_due(document)
         plan = document.get("plan") or {}
         plan_type_raw = plan.get("type")
         plan_status_raw = plan.get("status")
@@ -162,6 +206,7 @@ def _shop_briefs_by_owner(owner_ids: set[str]) -> dict[str, list[AdminShopBrief]
             plan_status = PlanStatus(plan_status_raw) if plan_status_raw else None
         except ValueError:
             plan_status = None
+        days_in_viewer, closes_in_days, closed_for_viewer = _shop_viewer_days(document)
         brief = AdminShopBrief(
             id=str(document["_id"]),
             name=str(document.get("name") or "Shop"),
@@ -170,6 +215,10 @@ def _shop_briefs_by_owner(owner_ids: set[str]) -> dict[str, list[AdminShopBrief]
             plan_name=str(plan.get("name") or (plan_type.value if plan_type else "") or None) or None,
             is_locked=bool(document.get("is_locked", False)),
             lock_reason=str(document.get("lock_reason") or "") or None,
+            is_open=bool(document.get("is_open", True)),
+            days_in_viewer=days_in_viewer,
+            closes_in_days=closes_in_days,
+            closed_for_viewer=closed_for_viewer,
         )
         result.setdefault(owner_id, []).append(brief)
     return result
@@ -208,8 +257,20 @@ def serialize_admin_user(user: dict, shop_briefs: list[AdminShopBrief] | None = 
     )
 
 
-def serialize_viewer(user: dict) -> ViewerRecord:
+def serialize_viewer(user: dict, shop_briefs: list[AdminShopBrief] | None = None) -> ViewerRecord:
     plan = build_plan_summary(user)
+    briefs = shop_briefs if shop_briefs is not None else []
+    days_in_viewer = None
+    if briefs:
+        values = [b.days_in_viewer for b in briefs if b.days_in_viewer is not None]
+        if values:
+            days_in_viewer = max(values)
+    elif get_user_role(user) == UserRole.viewer:
+        raw_plan = user.get("plan") or {}
+        downgraded = raw_plan.get("downgraded_at") or raw_plan.get("viewing_applied_at")
+        if isinstance(downgraded, datetime):
+            started = downgraded if downgraded.tzinfo else downgraded.replace(tzinfo=timezone.utc)
+            days_in_viewer = max(0, (datetime.now(timezone.utc) - started).days)
     return ViewerRecord(
         id=str(user["_id"]),
         display_name=user.get("display_name", ""),
@@ -219,6 +280,30 @@ def serialize_viewer(user: dict) -> ViewerRecord:
         plan_type=plan.type,
         plan_status=plan.status,
         days_remaining=plan.days_remaining,
+        shop_count=len(briefs),
+        shops=briefs,
+        days_in_viewer=days_in_viewer,
+        created_at=user["created_at"],
+        updated_at=user["updated_at"],
+    )
+
+
+def serialize_owner(user: dict, shop_briefs: list[AdminShopBrief] | None = None) -> OwnerRecord:
+    plan = build_plan_summary(user)
+    briefs = shop_briefs if shop_briefs is not None else []
+    return OwnerRecord(
+        id=str(user["_id"]),
+        display_name=user.get("display_name", ""),
+        email=user.get("email"),
+        phone_number=user.get("phone_number"),
+        account_status=user.get("account_status", "active"),
+        plan_type=plan.type,
+        plan_status=plan.status,
+        plan_is_active=plan.is_active,
+        plan_name=plan.name,
+        days_remaining=plan.days_remaining,
+        shop_count=len(briefs),
+        shops=briefs,
         created_at=user["created_at"],
         updated_at=user["updated_at"],
     )
@@ -461,8 +546,25 @@ def reject_plan_application(
 @router.get("/viewers", response_model=list[ViewerRecord])
 def list_viewers(_: Annotated[dict, Depends(require_admin)]) -> list[ViewerRecord]:
     # FIFO queue: oldest first
-    documents = users.find({"role": UserRole.viewer.value}).sort("created_at", 1)
-    return [serialize_viewer(document) for document in documents]
+    documents = list(users.find({"role": UserRole.viewer.value}).sort("created_at", 1))
+    owner_ids = {str(document["_id"]) for document in documents}
+    shops_by_owner = _shop_briefs_by_owner(owner_ids)
+    return [
+        serialize_viewer(document, shops_by_owner.get(str(document["_id"]), []))
+        for document in documents
+    ]
+
+
+@router.get("/owners", response_model=list[OwnerRecord])
+def list_owners(_: Annotated[dict, Depends(require_admin)]) -> list[OwnerRecord]:
+    """Active shop owners — counterpart to GET /admin/viewers."""
+    documents = list(users.find({"role": UserRole.owner.value}).sort("created_at", -1))
+    owner_ids = {str(document["_id"]) for document in documents}
+    shops_by_owner = _shop_briefs_by_owner(owner_ids)
+    return [
+        serialize_owner(document, shops_by_owner.get(str(document["_id"]), []))
+        for document in documents
+    ]
 
 
 @router.delete("/users", response_model=BulkDeleteUsersResponse)

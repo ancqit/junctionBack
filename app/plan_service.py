@@ -14,6 +14,9 @@ from .utils import parse_object_id
 TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
 GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
 PLAN_YEAR_DAYS = int(os.getenv("PLAN_YEAR_DAYS", os.getenv("PLAN_STARTER_DAYS", "365")))
+# Viewer-mode shops stay publicly open for this many days, then is_open flips to closed.
+# Owners can pay/activate to unlock and reopen the storefront.
+VIEWER_CLOSE_DAYS = int(os.getenv("VIEWER_CLOSE_DAYS", "7"))
 
 
 class PlanType(str, Enum):
@@ -192,9 +195,80 @@ def viewer_shop_plan_document() -> dict:
         "ends_at": now,
         "trial_used": True,
         "viewing_applied": True,
+        "viewing_applied_at": now,
         "selected_plan_type": None,
         "activated_by": None,
     }
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def viewer_mode_started_at(shop: dict) -> datetime | None:
+    """When this shop entered viewer / plan-expired lock mode."""
+    plan = shop.get("plan") or {}
+    for key in ("viewing_applied_at", "downgraded_at", "expired_at", "closed_at"):
+        started = _as_utc(plan.get(key))
+        if started is not None:
+            return started
+    if shop.get("is_locked") and shop.get("lock_reason") == "plan_expired":
+        return _as_utc(shop.get("updated_at"))
+    return None
+
+
+def close_storefront_if_viewer_due(shop: dict) -> dict:
+    """After VIEWER_CLOSE_DAYS in viewer mode, flip public is_open to closed.
+
+    Payment / plan select reopens the shop. Safe to call on every shop read.
+    """
+    if shop_owner_is_admin(shop):
+        return shop
+    plan = shop.get("plan") or {}
+    in_viewer = bool(plan.get("viewing_applied")) or (
+        bool(shop.get("is_locked")) and shop.get("lock_reason") == "plan_expired"
+    )
+    if not in_viewer:
+        return shop
+    if shop.get("is_open") is False:
+        return shop
+
+    started = viewer_mode_started_at(shop)
+    if started is None:
+        now = utc_now()
+        shops.update_one(
+            {"_id": shop["_id"]},
+            {"$set": {"plan.viewing_applied_at": now, "updated_at": now}},
+        )
+        return shop
+
+    if utc_now() < started + timedelta(days=VIEWER_CLOSE_DAYS):
+        return shop
+
+    now = utc_now()
+    updated = shops.find_one_and_update(
+        {
+            "_id": shop["_id"],
+            "is_open": {"$ne": False},
+            "$or": [
+                {"plan.viewing_applied": True},
+                {"is_locked": True, "lock_reason": "plan_expired"},
+            ],
+        },
+        {
+            "$set": {
+                "is_open": False,
+                "closed_for_viewer_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return updated or {**shop, "is_open": False, "closed_for_viewer_at": now}
 
 
 def user_has_active_number_trial(user: dict) -> bool:
@@ -249,19 +323,20 @@ def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
             PlanStatus.grace_period.value,
         }:
             continue
-        shops.update_one(
-            {"_id": shop["_id"]},
-            {
-                "$set": {
-                    "is_locked": True,
-                    "lock_reason": "plan_expired",
-                    "plan.status": PlanStatus.deactivated.value,
-                    "plan.viewing_applied": True,
-                    "plan.trial_used": True,
-                    "updated_at": now,
-                }
-            },
-        )
+        set_fields: dict = {
+            "is_locked": True,
+            "lock_reason": "plan_expired",
+            "plan.status": PlanStatus.deactivated.value,
+            "plan.viewing_applied": True,
+            "plan.trial_used": True,
+            "updated_at": now,
+        }
+        if not plan.get("viewing_applied_at"):
+            set_fields["plan.viewing_applied_at"] = now
+        shops.update_one({"_id": shop["_id"]}, {"$set": set_fields})
+        refreshed = shops.find_one({"_id": shop["_id"]})
+        if refreshed is not None:
+            close_storefront_if_viewer_due(refreshed)
 
 
 def is_paid_plan(plan_type: str | None) -> bool:
@@ -341,6 +416,7 @@ def downgrade_owner_to_viewer(user: dict) -> dict:
                 "role": UserRole.viewer.value,
                 "plan.status": PlanStatus.deactivated.value,
                 "plan.viewing_applied": True,
+                "plan.viewing_applied_at": now,
                 "plan.downgraded_at": now,
                 "plan.closed_at": now,
                 "updated_at": now,
@@ -851,6 +927,7 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
                 "plan.status": PlanStatus.deactivated.value,
                 "plan.expired_at": utc_now(),
                 "plan.viewing_applied": True,
+                "plan.viewing_applied_at": utc_now(),
                 "is_locked": True,
                 "lock_reason": "plan_expired",
                 "updated_at": utc_now(),
@@ -860,7 +937,7 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
     )
     result = updated or shop
     sync_owner_viewer_from_shop(result)
-    return result
+    return close_storefront_if_viewer_due(result)
 
 
 def expire_shop_paid_plan_if_needed(shop: dict) -> dict:
@@ -912,6 +989,7 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
             "$set": {
                 "plan.status": PlanStatus.deactivated.value,
                 "plan.viewing_applied": True,
+                "plan.viewing_applied_at": utc_now(),
                 "is_locked": True,
                 "lock_reason": "plan_expired",
                 "updated_at": utc_now(),
@@ -921,7 +999,7 @@ def expire_shop_grace_period_if_needed(shop: dict) -> dict:
     )
     result = updated or shop
     sync_owner_viewer_from_shop(result)
-    return result
+    return close_storefront_if_viewer_due(result)
 
 
 def build_shop_plan_summary(shop: dict) -> PlanSummary:
@@ -932,6 +1010,7 @@ def build_shop_plan_summary(shop: dict) -> PlanSummary:
     shop = expire_shop_trial_if_needed(shop)
     shop = expire_shop_paid_plan_if_needed(shop)
     shop = expire_shop_grace_period_if_needed(shop)
+    shop = close_storefront_if_viewer_due(shop)
     plan = shop.get("plan") or default_plan_document()
     plan_type = PlanType(plan.get("type", PlanType.free_trial.value))
     selected_plan_type = plan.get("selected_plan_type")
@@ -1028,6 +1107,8 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
                 "plan": plan_document,
                 "is_locked": False,
                 "lock_reason": None,
+                "is_open": True,
+                "closed_for_viewer_at": None,
                 "updated_at": now,
             }
         },
