@@ -23,7 +23,6 @@ from .plan_service import (
     admin_plan_summary,
     build_shop_plan_summary,
     get_shop_document,
-    require_active_shop_plan,
     shop_owner_is_admin,
 )
 from .roles import UserRole, get_user_role
@@ -120,14 +119,20 @@ def apply_bucket_packs(store_id: str, packs: int) -> int:
 
 
 def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
+    """Shop-scoped capacity snapshot for GET /product-bucket (and post-purchase).
+
+    Always returns counts for the resolved shop so the back-office can show
+    ``listed / plan limit`` even when the shop plan is expired or in grace.
+    Creating products still goes through ``ensure_can_add_product``.
+    """
     store_id = store_id.strip()
     require_store_access(user, store_id)
 
-    if get_user_role(user) == UserRole.admin:
-        shop = get_shop_document(store_id)
-        summary = admin_plan_summary() if shop_owner_is_admin(shop) else build_shop_plan_summary(shop)
+    shop = get_shop_document(store_id)
+    if get_user_role(user) == UserRole.admin and shop_owner_is_admin(shop):
+        summary = admin_plan_summary()
     else:
-        _, summary = require_active_shop_plan(store_id)
+        summary = build_shop_plan_summary(shop)
 
     products_count = products.count_documents({"store_id": store_id})
     extra_slots = get_extra_slots(store_id)
@@ -136,12 +141,16 @@ def build_product_bucket(user: dict, store_id: str) -> ProductBucketResponse:
     if plan_limit is None:
         capacity: int | None = None
         remaining: int | None = None
-        can_add = True
+        can_add = bool(summary.is_active) and not summary.profile_only
         plan_allowance_consumed = False
     else:
         capacity = plan_limit + extra_slots
         remaining = max(0, capacity - products_count)
-        can_add = products_count < capacity and not summary.profile_only
+        can_add = (
+            products_count < capacity
+            and not summary.profile_only
+            and bool(summary.is_active)
+        )
         plan_allowance_consumed = products_count >= plan_limit
 
     return ProductBucketResponse(
