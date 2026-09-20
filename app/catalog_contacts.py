@@ -85,7 +85,8 @@ MPIN_PATTERN = r"^\d{4,6}$"
 
 class CatalogMpinLoginRequest(BaseModel):
     phone_number: str = Field(min_length=8, max_length=20)
-    email: EmailStr
+    # Optional — returning unlock is phone + MPIN; email was collected at account create.
+    email: EmailStr | None = None
     mpin: str = Field(pattern=MPIN_PATTERN)
 
     @field_validator("phone_number")
@@ -173,6 +174,15 @@ def find_verified_contact(phone_number: str, email: str) -> dict | None:
     return doc
 
 
+def find_verified_contact_by_phone(phone_number: str) -> dict | None:
+    """Contacts are unique by phone — used for returning MPIN unlock."""
+    phone = normalize_e164_in(phone_number)
+    doc = catalog_contacts.find_one({"phone_number": phone})
+    if not doc or not doc.get("verified"):
+        return None
+    return doc
+
+
 @router.post("/recognize", response_model=CatalogContactSummary)
 @limiter.limit(RATE_LIMIT_AUTH)
 def recognize_catalog_contact(
@@ -206,15 +216,21 @@ def recognize_catalog_contact(
 @router.post("/mpin/login", response_model=CatalogMpinAuthResponse)
 @limiter.limit(RATE_LIMIT_AUTH)
 def catalog_mpin_login(request: Request, payload: CatalogMpinLoginRequest) -> CatalogMpinAuthResponse:
-    """Returning shopper unlock with MPIN (no SMS)."""
-    doc = find_verified_contact(payload.phone_number, str(payload.email))
+    """Returning shopper unlock with phone + MPIN (email optional; stored on the contact)."""
+    doc = find_verified_contact_by_phone(payload.phone_number)
     stored = (doc or {}).get("mpin_hash") or ""
     if doc is None or not stored or not verify_password(payload.mpin, stored):
-        raise HTTPException(status_code=401, detail="Invalid contact or MPIN")
+        raise HTTPException(status_code=401, detail="Invalid phone or MPIN")
+    email = (doc.get("email") or "").strip().lower()
+    if payload.email is not None:
+        # If a client still sends email, ignore mismatch — phone is the account key.
+        email = email or str(payload.email).strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Contact is missing email; reset with OTP")
     return CatalogMpinAuthResponse(
         verified=True,
         phone_number=doc["phone_number"],
-        email=doc.get("email") or str(payload.email).strip().lower(),
+        email=email,
         has_mpin=True,
         message="MPIN verified",
     )
