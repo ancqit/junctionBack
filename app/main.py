@@ -14,7 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from .access_control import AuthenticatedUser
-from .cors_config import load_cors_origins
+from .cors_config import load_cors_origin_regex, load_cors_origins
 from .database import items
 from .admin import router as admin_router
 from .aadhaar import router as aadhaar_router
@@ -62,6 +62,7 @@ app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=load_cors_origins(),
+    allow_origin_regex=load_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
