@@ -22,6 +22,7 @@ from .plan_service import (
     admin_delete_users,
     build_plan_summary,
     close_storefront_if_viewer_due,
+    lock_non_active_shops_for_owner,
     select_plan_for_shop,
     select_plan_for_user,
     viewer_mode_started_at,
@@ -418,6 +419,9 @@ def update_user_role(
     )
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if payload.role == UserRole.viewer:
+        # Close storefront so junction.today stops listing shops they cannot operate.
+        lock_non_active_shops_for_owner(user_id)
     briefs = _shop_briefs_by_owner({user_id}).get(user_id, [])
     return serialize_admin_user(user, briefs)
 

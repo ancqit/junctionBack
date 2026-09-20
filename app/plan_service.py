@@ -15,8 +15,9 @@ TRIAL_DAYS = int(os.getenv("PLAN_TRIAL_DAYS", "15"))
 GRACE_DAYS = int(os.getenv("PLAN_GRACE_DAYS", "15"))
 PLAN_YEAR_DAYS = int(os.getenv("PLAN_YEAR_DAYS", os.getenv("PLAN_STARTER_DAYS", "365")))
 # Viewer-mode shops stay publicly open for this many days, then is_open flips to closed.
+# 0 = close immediately (viewers cannot process orders — hide from catalog).
 # Owners can pay/activate to unlock and reopen the storefront.
-VIEWER_CLOSE_DAYS = int(os.getenv("VIEWER_CLOSE_DAYS", "7"))
+VIEWER_CLOSE_DAYS = int(os.getenv("VIEWER_CLOSE_DAYS", "0"))
 
 
 class PlanType(str, Enum):
@@ -222,8 +223,10 @@ def viewer_mode_started_at(shop: dict) -> datetime | None:
 
 
 def close_storefront_if_viewer_due(shop: dict) -> dict:
-    """After VIEWER_CLOSE_DAYS in viewer mode, flip public is_open to closed.
+    """When a shop is in viewer mode, flip public is_open to closed.
 
+    Viewers cannot process orders — keep them off junction.today / public lists.
+    VIEWER_CLOSE_DAYS=0 (default) closes immediately; higher values keep a grace window.
     Payment / plan select reopens the shop. Safe to call on every shop read.
     """
     if shop_owner_is_admin(shop):
@@ -238,18 +241,17 @@ def close_storefront_if_viewer_due(shop: dict) -> dict:
         return shop
 
     started = viewer_mode_started_at(shop)
+    now = utc_now()
     if started is None:
-        now = utc_now()
         shops.update_one(
             {"_id": shop["_id"]},
             {"$set": {"plan.viewing_applied_at": now, "updated_at": now}},
         )
+        started = now
+
+    if VIEWER_CLOSE_DAYS > 0 and now < started + timedelta(days=VIEWER_CLOSE_DAYS):
         return shop
 
-    if utc_now() < started + timedelta(days=VIEWER_CLOSE_DAYS):
-        return shop
-
-    now = utc_now()
     updated = shops.find_one_and_update(
         {
             "_id": shop["_id"],
@@ -329,6 +331,9 @@ def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
             "plan.status": PlanStatus.deactivated.value,
             "plan.viewing_applied": True,
             "plan.trial_used": True,
+            # Viewer cannot process orders — hide from public catalog immediately.
+            "is_open": False,
+            "closed_for_viewer_at": now,
             "updated_at": now,
         }
         if not plan.get("viewing_applied_at"):
