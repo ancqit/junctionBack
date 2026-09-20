@@ -17,7 +17,7 @@ Authorization: Bearer <access_token>
 
 - **JWT required** for business data. Send `Authorization: Bearer <access_token>` on every request except the public auth/plan/terms endpoints listed below.
 - **`junction.today` guest sessions:** call `POST /session` to get a short-lived JWT (`expires_in` default **900 seconds** / 15 min). Use that Bearer token for `/locations/*`, catalog **shop/product reads**, and **`POST /orders`** (place an order at any real shop). No user login required. Catalog reads are rate-limited (`RATE_LIMIT_CATALOG`).
-- **CORS** (`CORS_ORIGINS`) limits which browser sites (e.g. `https://junction.today`) may call the API. It does not block `curl` or Postman — session/user JWT checks do.
+- **CORS** (`CORS_ORIGINS`) limits which browser / Capacitor WebView origins may call the API. Env values are **merged** with defaults (junction.today, website, `capacitor://localhost`, …). It does not block `curl` or Postman — session/user JWT checks do. Opening `https://junctionback.onrender.com/session` in the address bar is not a CORS test (`POST` only).
 - **Shop-scoped writes** (and owner-app reads) require the user to own the shop (or be admin). `junction.today` session tokens are **read-only** for shops/products, except they may **create** orders via `POST /orders`.
 - **Image search routes** (`/queries`, `/products/images/suggest`) require JWT, an active plan, `PEXELS_API_KEY`, and are rate-limited (`RATE_LIMIT_AI`, default `30/hour`).
 - **Auth routes** are rate-limited (`RATE_LIMIT_AUTH`, default `20/minute`).
