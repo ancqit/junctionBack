@@ -31,6 +31,8 @@ class EnforcePlansResponse(BaseModel):
     downgraded: int
     closed: int
     log_rows: int
+    plans_activated: int = 0
+    trial_days: int | None = None
     ran_at: str
     catalog_trial_name: str | None = None
     viewer_close_days: int = VIEWER_CLOSE_DAYS
@@ -40,7 +42,7 @@ class EnforcePlansResponse(BaseModel):
 def cron_enforce_plans(
     x_cron_secret: Annotated[str | None, Header(alias="X-Cron-Secret")] = None,
 ) -> EnforcePlansResponse:
-    """Daily enforce: expire → viewer → close; upsert viewer-day logs. Keeps product data."""
+    """Daily enforce: trial→selected plan after 15d, else expire→viewer→close; viewer-day logs."""
     _require_cron_secret(x_cron_secret)
     try:
         ensure_viewer_day_log_indexes()
