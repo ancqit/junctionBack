@@ -73,6 +73,8 @@ class ShopCreate(BaseModel):
     city: str = Field(min_length=1, max_length=80)
     locality: str = Field(min_length=1, max_length=120)
     address: str | None = Field(default=None, max_length=240, description="Street / shop address line")
+    latitude: float | None = Field(default=None, ge=-90, le=90, description="Shop door latitude (WGS84)")
+    longitude: float | None = Field(default=None, ge=-180, le=180, description="Shop door longitude (WGS84)")
     open_time: str = Field(min_length=4, max_length=5, description="Shop open time HH:MM (24h)")
     closed_time: str = Field(min_length=4, max_length=5, description="Shop closed time HH:MM (24h)")
     is_open: bool = True
@@ -132,6 +134,8 @@ class ShopUpdate(BaseModel):
     city: str | None = Field(default=None, min_length=1, max_length=80)
     locality: str | None = Field(default=None, min_length=1, max_length=120)
     address: str | None = Field(default=None, max_length=240)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     open_time: str | None = Field(default=None, min_length=4, max_length=5)
     closed_time: str | None = Field(default=None, min_length=4, max_length=5)
     is_open: bool | None = None
@@ -246,6 +250,8 @@ class Shop(BaseModel):
     city: str
     locality: str
     address: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     open_time: str | None = None
     closed_time: str | None = None
     is_open: bool = True
@@ -268,6 +274,27 @@ class Shop(BaseModel):
     billing_hint: ShopBillingHint = Field(default_factory=ShopBillingHint)
     created_at: datetime
     updated_at: datetime
+
+
+def _normalize_coord(value: object, *, lo: float, hi: float) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number < lo or number > hi:  # NaN check
+        return None
+    return number
+
+
+def _coords_from_payload(latitude: float | None, longitude: float | None) -> tuple[float | None, float | None]:
+    """Require both or neither so Get directions always has a usable pair."""
+    lat = _normalize_coord(latitude, lo=-90, hi=90)
+    lng = _normalize_coord(longitude, lo=-180, hi=180)
+    if lat is None or lng is None:
+        return None, None
+    return lat, lng
 
 
 def _shop_type_label(value: str | None) -> str | None:
@@ -345,6 +372,8 @@ def serialize_shop(document: dict, owner: dict | None = None) -> Shop:
         city=document.get("city", ""),
         locality=document.get("locality", ""),
         address=address,
+        latitude=_normalize_coord(document.get("latitude"), lo=-90, hi=90),
+        longitude=_normalize_coord(document.get("longitude"), lo=-180, hi=180),
         open_time=document.get("open_time"),
         closed_time=document.get("closed_time"),
         is_open=bool(document.get("is_open", True)),
@@ -711,12 +740,15 @@ def create_shop(payload: ShopCreate, current_user: Annotated[dict, Depends(get_c
     city, locality = ensure_city_and_locality(payload.city, payload.locality)
     phone_number = get_user_phone_number(owner)
     shop_plan, is_locked, lock_reason = plan_document_for_new_shop(owner)
+    latitude, longitude = _coords_from_payload(payload.latitude, payload.longitude)
     now = datetime.now(timezone.utc)
     document = {
         "name": payload.name,
         "city": city,
         "locality": locality,
         "address": payload.address,
+        "latitude": latitude,
+        "longitude": longitude,
         "open_time": payload.open_time,
         "closed_time": payload.closed_time,
         "is_open": payload.is_open,
@@ -875,6 +907,13 @@ def update_shop(
         city, locality = ensure_city_and_locality(city, locality)
         changes["city"] = city
         changes["locality"] = locality
+
+    if "latitude" in changes or "longitude" in changes:
+        lat_raw = changes["latitude"] if "latitude" in changes else existing.get("latitude")
+        lng_raw = changes["longitude"] if "longitude" in changes else existing.get("longitude")
+        latitude, longitude = _coords_from_payload(lat_raw, lng_raw)
+        changes["latitude"] = latitude
+        changes["longitude"] = longitude
 
     changes["updated_at"] = datetime.now(timezone.utc)
     try:
