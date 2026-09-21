@@ -1,4 +1,4 @@
-"""In-memory Junction QR posters: brand mark, taglines, and PNG composition."""
+"""In-memory Junction QR posters: brand mark, taglines, and PNG/PDF composition."""
 
 from __future__ import annotations
 
@@ -32,6 +32,18 @@ class QrLine:
     kind: str  # tagline, saying, or thought
     en: str
     hi: str
+
+
+@dataclass(frozen=True)
+class PosterArt:
+    """Raster poster plus the clickable QR rectangle (top-left origin, pixels)."""
+
+    png: bytes
+    link_url: str
+    qr_x: int
+    qr_y: int
+    qr_w: int
+    qr_h: int
 
 
 TAGLINES: tuple[QrLine, ...] = (
@@ -231,6 +243,24 @@ def compose_poster(
     lines: list[QrLine],
     lang: str = "en",
 ) -> bytes:
+    """PNG bytes only (backward compatible)."""
+    return compose_poster_art(
+        payload=payload,
+        junction_label=junction_label,
+        shop_name=shop_name,
+        lines=lines,
+        lang=lang,
+    ).png
+
+
+def compose_poster_art(
+    *,
+    payload: str,
+    junction_label: str,
+    shop_name: str | None,
+    lines: list[QrLine],
+    lang: str = "en",
+) -> PosterArt:
     use_hi = lang.lower().startswith("hi")
     poster = Image.new("RGB", (POSTER_W, POSTER_H), CREAM)
     draw = ImageDraw.Draw(poster)
@@ -244,7 +274,7 @@ def compose_poster(
     title_font = _load_font(42, bold=True)
     draw.text((148, 42), BRAND_NAME, font=title_font, fill=GOLD)
     kicker_font = _load_font(18, bold=True)
-    draw.text((148, 92), "Scan for this Junction", font=kicker_font, fill=GOLD)
+    draw.text((148, 92), "Scan or tap for this Junction", font=kicker_font, fill=GOLD)
 
     y = 176
     if shop_name and shop_name.strip():
@@ -272,6 +302,8 @@ def compose_poster(
     card_x = (POSTER_W - card.size[0]) // 2
     card_y = min(max(y + 36, 320), 400)
     poster.paste(card, (card_x, card_y))
+    qr_x = card_x + 24
+    qr_y = card_y + 24
 
     caption_y = card_y + card.size[1] + 40
     shown = lines[:2]
@@ -300,10 +332,115 @@ def compose_poster(
 
     buffer = io.BytesIO()
     poster.save(buffer, format="PNG", optimize=True)
-    return buffer.getvalue()
+    return PosterArt(
+        png=buffer.getvalue(),
+        link_url=payload,
+        qr_x=qr_x,
+        qr_y=qr_y,
+        qr_w=qr_size,
+        qr_h=qr_size,
+    )
 
 
-def poster_filename(*, city: str, locality: str | None, shop_name: str | None) -> str:
+def compose_poster_pdf(art: PosterArt) -> bytes:
+    """PDF with the poster image and a real hyperlink over the QR (PNG cannot do this)."""
+    rgb = Image.open(io.BytesIO(art.png)).convert("RGB")
+    jpeg_buf = io.BytesIO()
+    rgb.save(jpeg_buf, format="JPEG", quality=92, optimize=True)
+    jpeg = jpeg_buf.getvalue()
+    return _pdf_with_linked_jpeg(
+        jpeg=jpeg,
+        width=POSTER_W,
+        height=POSTER_H,
+        link_url=art.link_url,
+        # PDF y is from bottom-left.
+        link_x=art.qr_x,
+        link_y=POSTER_H - art.qr_y - art.qr_h,
+        link_w=art.qr_w,
+        link_h=art.qr_h,
+    )
+
+
+def _pdf_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _pdf_with_linked_jpeg(
+    *,
+    jpeg: bytes,
+    width: int,
+    height: int,
+    link_url: str,
+    link_x: int,
+    link_y: int,
+    link_w: int,
+    link_h: int,
+) -> bytes:
+    """Minimal one-page PDF: full-page JPEG + URI link annotation over the QR."""
+    objects: list[bytes] = []
+
+    def add(obj: bytes) -> int:
+        objects.append(obj)
+        return len(objects)
+
+    # 1 Catalog
+    add(b"<< /Type /Catalog /Pages 2 0 R >>")
+    # 2 Pages
+    add(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    # 3 Page
+    add(
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+        f"/Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> "
+        f"/Annots [6 0 R] >>".encode("ascii")
+    )
+    # 4 Content stream — draw image
+    content = f"q {width} 0 0 {height} 0 0 cm /Im1 Do Q\n".encode("ascii")
+    add(f"<< /Length {len(content)} >>\nstream\n".encode("ascii") + content + b"\nendstream")
+    # 5 Image XObject
+    img_dict = (
+        f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
+        f"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+        f"/Length {len(jpeg)} >>\nstream\n".encode("ascii")
+        + jpeg
+        + b"\nendstream"
+    )
+    add(img_dict)
+    # 6 Link annotation (URI)
+    annot = (
+        f"<< /Type /Annot /Subtype /Link "
+        f"/Rect [{link_x} {link_y} {link_x + link_w} {link_y + link_h}] "
+        f"/Border [0 0 0] "
+        f"/A << /S /URI /URI ({_pdf_escape(link_url)}) >> >>"
+    ).encode("ascii")
+    add(annot)
+
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(f"{index} 0 obj\n".encode("ascii"))
+        out.write(obj)
+        out.write(b"\nendobj\n")
+    xref_pos = out.tell()
+    out.write(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    out.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.write(f"{off:010d} 00000 n \n".encode("ascii"))
+    out.write(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF\n".encode("ascii")
+    )
+    return out.getvalue()
+
+
+def poster_filename(
+    *,
+    city: str,
+    locality: str | None,
+    shop_name: str | None,
+    ext: str = "png",
+) -> str:
     bits = ["junction"]
     for part in (shop_name, locality, city):
         cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in (part or "").strip())
@@ -311,4 +448,5 @@ def poster_filename(*, city: str, locality: str | None, shop_name: str | None) -
         if cleaned:
             bits.append(cleaned)
     bits.append("qr")
-    return "-".join(bits)[:80] + ".png"
+    suffix = ext if ext.startswith(".") else f".{ext}"
+    return "-".join(bits)[:80] + suffix
