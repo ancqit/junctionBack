@@ -305,7 +305,19 @@ def compose_poster_art(
     qr_x = card_x + 24
     qr_y = card_y + 24
 
-    caption_y = card_y + card.size[1] + 40
+    note = (
+        "नोट : जंक्शन खोलने के लिए QR कोड पर क्लिक करें।"
+        if use_hi
+        else "Note : Click the QR code to open junction."
+    )
+    note_font = _load_font(20, bold=True, devanagari=use_hi)
+    note_y = card_y + card.size[1] + 18
+    for row in _wrap(draw, note, note_font, POSTER_W - 120):
+        tw = _text_width(draw, row, note_font)
+        draw.text(((POSTER_W - tw) / 2, note_y), row, font=note_font, fill=INK)
+        note_y += 26
+
+    caption_y = note_y + 16
     shown = lines[:2]
     for line in shown:
         text = line.hi if use_hi else line.en
