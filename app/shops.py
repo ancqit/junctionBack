@@ -752,6 +752,39 @@ def get_shop_plan(shop_id: str, current_user: Annotated[dict, Depends(get_curren
     return build_shop_plan_summary(document)
 
 
+@router.get("/{shop_id}/viewer-days")
+def get_shop_viewer_days(
+    shop_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    limit: int = Query(default=90, ge=1, le=366),
+) -> dict:
+    """Viewer-day log for deactivated overview — data kept; days parked without a plan."""
+    from .plan_enforcement import list_shop_viewer_day_logs
+    from .plan_service import close_storefront_if_viewer_due, viewer_mode_started_at
+
+    document = shops.find_one({"_id": parse_object_id(shop_id, "Shop")})
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
+    ensure_shop_access(current_user, document)
+    document = close_storefront_if_viewer_due(document)
+    started = viewer_mode_started_at(document)
+    days_in_viewer = None
+    if started is not None:
+        days_in_viewer = max(0, (datetime.now(timezone.utc) - started).days)
+    rows = list_shop_viewer_day_logs(str(document["_id"]), limit=limit)
+    return {
+        "shop_id": str(document["_id"]),
+        "days_in_viewer": days_in_viewer,
+        "closed_for_viewer": document.get("is_open") is False
+        and (
+            bool((document.get("plan") or {}).get("viewing_applied"))
+            or document.get("lock_reason") == "plan_expired"
+        ),
+        "days": rows,
+        "count": len(rows),
+    }
+
+
 @router.post("/{shop_id}/plan/purchase", response_model=ShopPayment, status_code=status.HTTP_201_CREATED)
 def purchase_shop_plan(
     shop_id: str,

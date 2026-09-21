@@ -15,6 +15,7 @@ from .database import plan_applications, shops, users
 from .login import get_current_user
 from .plan_applications import PlanApplication, serialize_application
 from .plan_service import (
+    PLAN_CATALOG,
     PlanStatus,
     PlanType,
     VIEWER_CLOSE_DAYS,
@@ -27,6 +28,7 @@ from .plan_service import (
     select_plan_for_user,
     viewer_mode_started_at,
 )
+from .plan_enforcement import enforce_plans_once, list_shop_viewer_day_logs
 from .platform import PLATFORM_LABELS, Platform, normalize_platform
 from .role_keeper import get_role_keeper_document, load_role_keeper, save_role_keeper
 from .roles import UserRole, get_user_role
@@ -116,6 +118,7 @@ class OwnerRecord(BaseModel):
     plan_status: PlanStatus
     plan_is_active: bool
     plan_name: str
+    selected_plan_type: PlanType | None = None
     days_remaining: int | None = None
     shop_count: int = 0
     shops: list[AdminShopBrief] = Field(default_factory=list)
@@ -208,12 +211,15 @@ def _shop_briefs_by_owner(owner_ids: set[str]) -> dict[str, list[AdminShopBrief]
         except ValueError:
             plan_status = None
         days_in_viewer, closes_in_days, closed_for_viewer = _shop_viewer_days(document)
+        catalog_name = None
+        if plan_type is not None:
+            catalog_name = PLAN_CATALOG.get(plan_type.value, {}).get("name")
         brief = AdminShopBrief(
             id=str(document["_id"]),
             name=str(document.get("name") or "Shop"),
             plan_type=plan_type,
             plan_status=plan_status,
-            plan_name=str(plan.get("name") or (plan_type.value if plan_type else "") or None) or None,
+            plan_name=catalog_name or (plan_type.value if plan_type else None),
             is_locked=bool(document.get("is_locked", False)),
             lock_reason=str(document.get("lock_reason") or "") or None,
             is_open=bool(document.get("is_open", True)),
@@ -302,6 +308,7 @@ def serialize_owner(user: dict, shop_briefs: list[AdminShopBrief] | None = None)
         plan_status=plan.status,
         plan_is_active=plan.is_active,
         plan_name=plan.name,
+        selected_plan_type=plan.selected_plan_type,
         days_remaining=plan.days_remaining,
         shop_count=len(briefs),
         shops=briefs,
@@ -569,6 +576,35 @@ def list_owners(_: Annotated[dict, Depends(require_admin)]) -> list[OwnerRecord]
         serialize_owner(document, shops_by_owner.get(str(document["_id"]), []))
         for document in documents
     ]
+
+
+class EnforcePlansResponse(BaseModel):
+    users_scanned: int
+    shops_scanned: int
+    downgraded: int
+    closed: int
+    log_rows: int
+    ran_at: str
+    catalog_trial_name: str | None = None
+    viewer_close_days: int = VIEWER_CLOSE_DAYS
+
+
+@router.post("/jobs/enforce-plans", response_model=EnforcePlansResponse)
+def admin_enforce_plans(_: Annotated[dict, Depends(require_admin)]) -> EnforcePlansResponse:
+    """Daily-style sweep: expire trials/plans → viewer → close shops; log viewer days."""
+    result = enforce_plans_once()
+    return EnforcePlansResponse(**result, viewer_close_days=VIEWER_CLOSE_DAYS)
+
+
+@router.get("/shops/{shop_id}/viewer-days")
+def admin_shop_viewer_days(
+    shop_id: str,
+    _: Annotated[dict, Depends(require_admin)],
+    limit: int = Query(default=90, ge=1, le=366),
+) -> dict:
+    parse_object_id(shop_id, "Shop")
+    rows = list_shop_viewer_day_logs(shop_id, limit=limit)
+    return {"shop_id": shop_id, "days": rows, "count": len(rows)}
 
 
 @router.delete("/users", response_model=BulkDeleteUsersResponse)

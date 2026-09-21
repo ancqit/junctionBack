@@ -43,6 +43,7 @@ from .gst import router as gst_router
 from .monster import router as monster_router
 from .monster_profiles import router as monster_profiles_router
 from .qr import router as qr_router
+from .internal_jobs import router as internal_jobs_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -95,6 +96,7 @@ _routers = (
     monster_router,
     monster_profiles_router,
     qr_router,
+    internal_jobs_router,
 )
 for _router in _routers:
     app.include_router(_router)
