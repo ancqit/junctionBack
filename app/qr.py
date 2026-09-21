@@ -1,5 +1,7 @@
 """Public, stateless QR poster generator for junction.today and Junction Front Web."""
 
+from typing import Literal
+
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, Field
 
@@ -8,7 +10,8 @@ from .qr_brand import (
     LOGO_SVG,
     TAGLINES,
     build_junction_url,
-    compose_poster,
+    compose_poster_art,
+    compose_poster_pdf,
     poster_filename,
     resolve_taglines,
 )
@@ -38,6 +41,8 @@ class QrGenerateRequest(BaseModel):
     saying_ids: list[str] = Field(default_factory=list, max_length=3)
     custom_slogan: str | None = Field(default=None, max_length=160)
     lang: str = Field(default="en", max_length=8)
+    # pdf = clickable QR link (like a PDF hyperlink). png = print/share raster only.
+    format: Literal["png", "pdf"] = "png"
 
 
 @router.get("/taglines", response_model=TaglineCatalog)
@@ -63,25 +68,35 @@ def _poster_response(payload: QrGenerateRequest) -> Response:
     )
     url = build_junction_url(city=city, locality=locality, shop_name=shop_name, store_id=store_id)
     place = f"{locality}, {city}" if locality else city
-    png = compose_poster(
+    art = compose_poster_art(
         payload=url,
         junction_label=place,
         shop_name=shop_name,
         lines=lines,
         lang=payload.lang,
     )
-    filename = poster_filename(city=city, locality=locality, shop_name=shop_name)
+    if payload.format == "png":
+        body = art.png
+        media = "image/png"
+        filename = poster_filename(city=city, locality=locality, shop_name=shop_name, ext="png")
+    else:
+        body = compose_poster_pdf(art)
+        media = "application/pdf"
+        filename = poster_filename(city=city, locality=locality, shop_name=shop_name, ext="pdf")
     return Response(
-        content=png,
-        media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content=body,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Junction-QR-URL": url,
+        },
     )
 
 
 @router.post("/generate")
 @limiter.limit(RATE_LIMIT_QR)
 def generate_qr(request: Request, payload: QrGenerateRequest) -> Response:
-    """Build a branded PNG poster in memory and return it for download. Nothing is stored."""
+    """Build a branded poster. PDF includes a tap/click link on the QR; PNG is raster-only."""
     return _poster_response(payload)
 
 
@@ -95,6 +110,7 @@ def generate_qr_get(
     store_id: str | None = Query(default=None, max_length=80),
     tagline_id: str | None = Query(default=None, max_length=40),
     lang: str = Query(default="en", max_length=8),
+    format: Literal["png", "pdf"] = Query(default="png"),
 ) -> Response:
     return _poster_response(
         QrGenerateRequest(
@@ -104,5 +120,6 @@ def generate_qr_get(
             store_id=store_id,
             tagline_id=tagline_id,
             lang=lang,
+            format=format,
         ),
     )
