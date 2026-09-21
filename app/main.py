@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from datetime import datetime, timezone
 
@@ -47,10 +48,45 @@ from .internal_jobs import router as internal_jobs_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """On deploy/boot: optional plan sweep so live shops enter the trial→plan loop immediately."""
+    if _env_flag("ENFORCE_PLANS_ON_STARTUP", default=True):
+        try:
+            from .plan_enforcement import enforce_plans_once, ensure_viewer_day_log_indexes
+
+            try:
+                ensure_viewer_day_log_indexes()
+            except Exception:
+                pass
+            result = enforce_plans_once()
+            print(
+                "startup plan enforce:",
+                f"activated={result.get('plans_activated', 0)}",
+                f"downgraded={result.get('downgraded', 0)}",
+                f"closed={result.get('closed', 0)}",
+                f"shops={result.get('shops_scanned', 0)}",
+                flush=True,
+            )
+        except Exception as exc:
+            # Never block boot — daily cron / admin button remain available.
+            print(f"startup plan enforce failed: {exc}", flush=True)
+    yield
+
+
 app = FastAPI(
     title="Junction Backend",
     description="A small CRUD API backed by MongoDB.",
     version="1.0.0",
+    lifespan=lifespan,
     docs_url="/docs" if _openapi_enabled else None,
     redoc_url="/redoc" if _openapi_enabled else None,
     openapi_url="/openapi.json" if _openapi_enabled else None,

@@ -315,7 +315,10 @@ def plan_document_for_new_shop(owner: dict) -> tuple[dict, bool, str | None]:
 
 
 def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
-    """Lock owned shops that are not on an active/grace paid plan (viewer mode)."""
+    """Lock owned shops that are not on an active/grace paid plan (viewer mode).
+
+    Shops past trial with a selected plan are activated first (plan buckets), not locked.
+    """
     now = utc_now()
     for shop in shops.find({"owner_user_id": str(owner_user_id)}):
         plan = shop.get("plan") or {}
@@ -325,6 +328,16 @@ def lock_non_active_shops_for_owner(owner_user_id: str) -> None:
             PlanStatus.grace_period.value,
         }:
             continue
+        # Trial ended with intent → activate selected plan instead of viewer lock.
+        if (
+            plan.get("type") == PlanType.free_trial.value
+            and status_value == PlanStatus.active.value
+        ):
+            activated_shop, activated = activate_selected_plan_after_shop_trial(shop)
+            if activated:
+                continue
+            shop = activated_shop
+            plan = shop.get("plan") or {}
         set_fields: dict = {
             "is_locked": True,
             "lock_reason": "plan_expired",
@@ -563,8 +576,30 @@ def require_active_plan(user: dict) -> PlanSummary:
     return summary
 
 
+def mirror_selected_plan_to_trial_shops(owner_user_id: str, plan_type: PlanType, *, now: datetime | None = None) -> int:
+    """Stamp paid-plan intent on free-trial shops without activating yet (trial stays active)."""
+    if not is_paid_plan(plan_type.value):
+        return 0
+    stamp = now or utc_now()
+    result = shops.update_many(
+        {
+            "owner_user_id": str(owner_user_id),
+            "plan.type": PlanType.free_trial.value,
+            "plan.status": PlanStatus.active.value,
+        },
+        {
+            "$set": {
+                "plan.selected_plan_type": plan_type.value,
+                "plan.selected_at": stamp,
+                "updated_at": stamp,
+            }
+        },
+    )
+    return int(result.modified_count or 0)
+
+
 def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
-    """Record paid-plan intent only. Facilities unlock after shop payment / admin shop assign."""
+    """Record paid-plan intent only. Free trial stays active until shop trial ends (then selected activates)."""
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -591,7 +626,7 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial has already been used")
 
     now = utc_now()
-    # Intent only — keep free_trial (or current) type/status/ends_at until shop is paid.
+    # Intent only — keep free_trial (or current) type/status/ends_at until trial window ends.
     updated = users.find_one_and_update(
         {"_id": user_id},
         {
@@ -603,6 +638,7 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         },
         return_document=ReturnDocument.AFTER,
     )
+    mirror_selected_plan_to_trial_shops(str(user_id), plan_type, now=now)
     return build_plan_summary(updated or user)
 
 
@@ -858,6 +894,64 @@ def sync_owner_viewer_from_shop(shop: dict) -> None:
         downgrade_owner_to_viewer(user)
 
 
+def shop_trial_due_at(shop: dict) -> datetime | None:
+    """Trial ends TRIAL_DAYS after shop.created_at (fallback: plan.ends_at / started_at + TRIAL_DAYS)."""
+    created = _as_utc(shop.get("created_at"))
+    if created is not None:
+        return created + timedelta(days=TRIAL_DAYS)
+    plan = shop.get("plan") or {}
+    ends_at = _as_utc(plan.get("ends_at"))
+    if ends_at is not None:
+        return ends_at
+    started = _as_utc(plan.get("started_at"))
+    if started is not None:
+        return started + timedelta(days=TRIAL_DAYS)
+    return None
+
+
+def resolve_shop_selected_plan_type(shop: dict) -> PlanType | None:
+    """Paid intent on the shop, else the owner's selected_plan_type."""
+    plan = shop.get("plan") or {}
+    raw = plan.get("selected_plan_type")
+    if is_paid_plan(raw):
+        try:
+            return PlanType(raw)
+        except ValueError:
+            pass
+    owner = _shop_owner(shop)
+    if owner is None:
+        return None
+    owner_raw = (owner.get("plan") or {}).get("selected_plan_type")
+    if is_paid_plan(owner_raw):
+        try:
+            return PlanType(owner_raw)
+        except ValueError:
+            return None
+    return None
+
+
+def activate_selected_plan_after_shop_trial(shop: dict) -> tuple[dict, bool]:
+    """After shop.created_at + 15 days: free trial → selected paid plan (plan buckets only).
+
+    Returns (shop, activated). If no selected plan, returns the shop unchanged and False
+    so callers can demote to viewer.
+    """
+    if shop_owner_is_admin(shop):
+        return heal_admin_owned_shop_plan(shop), False
+    plan = shop.get("plan") or {}
+    if plan.get("type") != PlanType.free_trial.value or plan.get("status") != PlanStatus.active.value:
+        return shop, False
+    due_at = shop_trial_due_at(shop)
+    if due_at is None or utc_now() < due_at:
+        return shop, False
+    selected = resolve_shop_selected_plan_type(shop)
+    if selected is None:
+        return shop, False
+    select_plan_for_shop(str(shop["_id"]), selected)
+    refreshed = shops.find_one({"_id": shop["_id"]}) or shop
+    return refreshed, True
+
+
 def expire_shop_trial_if_needed(shop: dict) -> dict:
     if shop_owner_is_admin(shop):
         return heal_admin_owned_shop_plan(shop)
@@ -866,13 +960,16 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
         return shop
     if plan.get("type") != PlanType.free_trial.value or plan.get("status") != PlanStatus.active.value:
         return shop
-    ends_at = plan.get("ends_at")
-    if ends_at is None:
+    due_at = shop_trial_due_at(shop)
+    if due_at is None:
         return shop
-    if ends_at.tzinfo is None:
-        ends_at = ends_at.replace(tzinfo=timezone.utc)
-    if utc_now() < ends_at:
+    if utc_now() < due_at:
         return shop
+
+    activated_shop, activated = activate_selected_plan_after_shop_trial(shop)
+    if activated:
+        return activated_shop
+
     updated = shops.find_one_and_update(
         {"_id": shop["_id"], "plan.status": PlanStatus.active.value, "plan.type": PlanType.free_trial.value},
         {
@@ -1102,6 +1199,12 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
                     }
                 },
             )
+    try:
+        from .product_bucket import sync_plan_bucket_snapshot
+
+        sync_plan_bucket_snapshot(str(shop["_id"]), plan_type, details.get("max_products"))
+    except Exception:
+        pass
     return build_shop_plan_summary(updated or shop)
 
 

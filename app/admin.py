@@ -584,6 +584,8 @@ class EnforcePlansResponse(BaseModel):
     downgraded: int
     closed: int
     log_rows: int
+    plans_activated: int = 0
+    trial_days: int | None = None
     ran_at: str
     catalog_trial_name: str | None = None
     viewer_close_days: int = VIEWER_CLOSE_DAYS
@@ -591,7 +593,7 @@ class EnforcePlansResponse(BaseModel):
 
 @router.post("/jobs/enforce-plans", response_model=EnforcePlansResponse)
 def admin_enforce_plans(_: Annotated[dict, Depends(require_admin)]) -> EnforcePlansResponse:
-    """Daily-style sweep: expire trials/plans → viewer → close shops; log viewer days."""
+    """Daily sweep: trial→selected plan after 15d, else expire→viewer→close; log viewer days."""
     result = enforce_plans_once()
     return EnforcePlansResponse(**result, viewer_close_days=VIEWER_CLOSE_DAYS)
 

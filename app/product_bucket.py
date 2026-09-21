@@ -86,6 +86,30 @@ def _ensure_bucket_indexes() -> None:
     product_buckets.create_index("store_id", unique=True)
 
 
+def sync_plan_bucket_snapshot(store_id: str, plan_type: PlanType, plan_limit: int | None) -> None:
+    """Persist which plan capacity this shop's bucket follows (plan limit only; packs unchanged)."""
+    store_id = store_id.strip()
+    _ensure_bucket_indexes()
+    now = utc_now()
+    product_buckets.update_one(
+        {"store_id": store_id},
+        {
+            "$set": {
+                "plan_type": plan_type.value,
+                "plan_limit": plan_limit,
+                "updated_at": now,
+            },
+            "$setOnInsert": {
+                "created_at": now,
+                "store_id": store_id,
+                "extra_slots": 0,
+                "packs_purchased": 0,
+            },
+        },
+        upsert=True,
+    )
+
+
 def get_extra_slots(store_id: str) -> int:
     document = product_buckets.find_one({"store_id": store_id.strip()})
     if document is None:

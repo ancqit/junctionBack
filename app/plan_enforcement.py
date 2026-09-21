@@ -1,4 +1,4 @@
-"""Daily plan enforcement: expire trials/plans → viewer → close shops; log viewer days.
+"""Daily plan cron helpers: trial → selected plan, expire → viewer → close, viewer-day logs.
 
 Does not delete products or product_buckets (data retained until new plan payment).
 """
@@ -12,6 +12,8 @@ from .plan_service import (
     PLAN_CATALOG,
     PlanStatus,
     PlanType,
+    TRIAL_DAYS,
+    activate_selected_plan_after_shop_trial,
     close_storefront_if_viewer_due,
     expire_grace_period_if_needed,
     expire_paid_plan_if_needed,
@@ -19,6 +21,8 @@ from .plan_service import (
     expire_shop_paid_plan_if_needed,
     expire_shop_trial_if_needed,
     expire_trial_if_needed,
+    is_paid_plan,
+    shop_trial_due_at,
     viewer_mode_started_at,
 )
 from .roles import UserRole, get_user_role
@@ -107,14 +111,49 @@ def list_shop_viewer_day_logs(shop_id: str, *, limit: int = 90) -> list[dict]:
     return rows
 
 
+def promote_due_trial_shops_to_selected_plan(*, now: datetime | None = None) -> dict:
+    """Cron helper: shops past created_at + TRIAL_DAYS with a selected plan → activate that plan.
+
+    Free trial was active; selected plan becomes active; product capacity follows that plan only.
+    """
+    stamp = now or datetime.now(timezone.utc)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    scanned = 0
+    activated = 0
+    for shop in shops.find(
+        {
+            "plan.type": PlanType.free_trial.value,
+            "plan.status": PlanStatus.active.value,
+        }
+    ):
+        scanned += 1
+        due_at = shop_trial_due_at(shop)
+        if due_at is None or stamp < due_at:
+            continue
+        _, did = activate_selected_plan_after_shop_trial(shop)
+        if did:
+            activated += 1
+    return {
+        "trial_shops_scanned": scanned,
+        "plans_activated": activated,
+        "trial_days": TRIAL_DAYS,
+        "ran_at": stamp.isoformat(),
+    }
+
+
 def enforce_plans_once() -> dict:
-    """Sweep users + shops: expire → viewer → close; log viewer days. Keeps product data."""
+    """Sweep: promote due trial→selected plan, then expire users/shops → viewer → close."""
     now = datetime.now(timezone.utc)
     users_scanned = 0
     shops_scanned = 0
     downgraded = 0
     closed = 0
     log_rows = 0
+
+    # Promote first so user-trial lock does not park shops that already chose a plan.
+    promote = promote_due_trial_shops_to_selected_plan(now=now)
+    plans_activated = int(promote.get("plans_activated") or 0)
 
     for user in users.find({}):
         if get_user_role(user) == UserRole.admin:
@@ -135,7 +174,11 @@ def enforce_plans_once() -> dict:
         shops_scanned += 1
         was_open = shop.get("is_open") is not False
         in_viewer_before = _shop_in_viewer(shop)
+        before_type = (shop.get("plan") or {}).get("type")
         refreshed = expire_shop_trial_if_needed(shop)
+        after_type = (refreshed.get("plan") or {}).get("type")
+        if before_type == PlanType.free_trial.value and is_paid_plan(after_type):
+            plans_activated += 1
         refreshed = expire_shop_paid_plan_if_needed(refreshed)
         refreshed = expire_shop_grace_period_if_needed(refreshed)
         refreshed = close_storefront_if_viewer_due(refreshed)
@@ -153,6 +196,8 @@ def enforce_plans_once() -> dict:
         "downgraded": downgraded,
         "closed": closed,
         "log_rows": log_rows,
+        "plans_activated": plans_activated,
+        "trial_days": TRIAL_DAYS,
         "ran_at": now.isoformat(),
         "catalog_trial_name": PLAN_CATALOG[PlanType.free_trial.value]["name"],
     }
