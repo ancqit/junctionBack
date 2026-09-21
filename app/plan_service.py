@@ -364,7 +364,7 @@ def initialize_user_plan(user_id: ObjectId) -> dict:
 
 
 def restore_persisted_plan(user: dict) -> dict:
-    """Reload plan from DB, restore a selected paid plan on login, and apply expiry checks."""
+    """Reload plan from DB and apply expiry checks (no unpaid 'restore to Starter')."""
     if get_user_role(user) == UserRole.admin:
         return user
 
@@ -376,35 +376,6 @@ def restore_persisted_plan(user: dict) -> dict:
     if plan is None:
         initialize_user_plan(refreshed["_id"])
         refreshed = users.find_one({"_id": user["_id"]}) or refreshed
-        refreshed = expire_trial_if_needed(refreshed)
-        refreshed = expire_paid_plan_if_needed(refreshed)
-        return expire_grace_period_if_needed(refreshed)
-
-    if plan.get("status") not in {
-        PlanStatus.grace_period.value,
-        PlanStatus.expired.value,
-    } and not plan.get("viewing_applied"):
-        selected_plan_type = plan.get("selected_plan_type")
-        if selected_plan_type is None and is_paid_plan(plan.get("type")):
-            selected_plan_type = plan.get("type")
-
-        if is_paid_plan(selected_plan_type):
-            now = utc_now()
-            updated = users.find_one_and_update(
-                {"_id": refreshed["_id"]},
-                {
-                    "$set": {
-                        "plan.type": selected_plan_type,
-                        "plan.selected_plan_type": selected_plan_type,
-                        "plan.status": PlanStatus.active.value,
-                        "plan.ends_at": None,
-                        "plan.restored_at": now,
-                        "updated_at": now,
-                    }
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-            refreshed = updated or refreshed
 
     refreshed = expire_trial_if_needed(refreshed)
     refreshed = expire_paid_plan_if_needed(refreshed)
@@ -436,7 +407,7 @@ def downgrade_owner_to_viewer(user: dict) -> dict:
 
 
 def expire_paid_plan_if_needed(user: dict) -> dict:
-    """When a paid plan (Starter/Growth/Premium) expires, start a 15-day grace period."""
+    """When a paid plan expires, demote to viewer immediately (no grace — truth #2)."""
     plan = user.get("plan")
     if not plan or plan.get("status") != PlanStatus.active.value:
         return user
@@ -453,23 +424,7 @@ def expire_paid_plan_if_needed(user: dict) -> dict:
     if utc_now() < ends_at:
         return user
 
-    now = utc_now()
-    grace_ends_at = now + timedelta(days=GRACE_DAYS)
-    updated = users.find_one_and_update(
-        {"_id": user["_id"], "plan.status": PlanStatus.active.value},
-        {
-            "$set": {
-                "plan.status": PlanStatus.grace_period.value,
-                "plan.selected_plan_type": plan.get("selected_plan_type") or plan.get("type"),
-                "plan.grace_started_at": now,
-                "plan.grace_ends_at": grace_ends_at,
-                "plan.expired_at": now,
-                "updated_at": now,
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    return updated or user
+    return downgrade_owner_to_viewer(user)
 
 
 def expire_grace_period_if_needed(user: dict) -> dict:
@@ -609,6 +564,7 @@ def require_active_plan(user: dict) -> PlanSummary:
 
 
 def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
+    """Record paid-plan intent only. Facilities unlock after shop payment / admin shop assign."""
     user = users.find_one({"_id": user_id})
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -635,27 +591,19 @@ def select_plan_for_user(user_id: ObjectId, plan_type: PlanType) -> PlanSummary:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Free trial has already been used")
 
     now = utc_now()
-    details = PLAN_CATALOG[plan_type.value]
-    duration_days = details.get("duration_days")
-    ends_at = now + timedelta(days=duration_days) if duration_days else None
-    plan_document = {
-        "type": plan_type.value,
-        "status": PlanStatus.active.value,
-        "started_at": existing_plan.get("started_at", now),
-        "ends_at": ends_at,
-        "grace_ends_at": None,
-        "grace_started_at": None,
-        "viewing_applied": False,
-        "trial_used": bool(existing_plan.get("trial_used", False)),
-        "selected_plan_type": plan_type.value,
-        "selected_at": now,
-    }
+    # Intent only — keep free_trial (or current) type/status/ends_at until shop is paid.
     updated = users.find_one_and_update(
         {"_id": user_id},
-        {"$set": {"plan": plan_document, "role": UserRole.owner.value, "updated_at": now}},
+        {
+            "$set": {
+                "plan.selected_plan_type": plan_type.value,
+                "plan.selected_at": now,
+                "updated_at": now,
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
-    return build_plan_summary(updated)
+    return build_plan_summary(updated or user)
 
 
 def cancel_plan_for_user(user_id: ObjectId) -> PlanSummary:
@@ -946,6 +894,9 @@ def expire_shop_trial_if_needed(shop: dict) -> dict:
 
 
 def expire_shop_paid_plan_if_needed(shop: dict) -> dict:
+    """Paid shop plan ended → immediate viewer lock + close (no grace)."""
+    if shop_owner_is_admin(shop):
+        return heal_admin_owned_shop_plan(shop)
     plan = shop.get("plan")
     if not plan or plan.get("status") != PlanStatus.active.value:
         return shop
@@ -959,22 +910,27 @@ def expire_shop_paid_plan_if_needed(shop: dict) -> dict:
     if utc_now() < ends_at:
         return shop
     now = utc_now()
-    grace_ends_at = now + timedelta(days=GRACE_DAYS)
     updated = shops.find_one_and_update(
         {"_id": shop["_id"], "plan.status": PlanStatus.active.value},
         {
             "$set": {
-                "plan.status": PlanStatus.grace_period.value,
+                "plan.status": PlanStatus.deactivated.value,
                 "plan.selected_plan_type": plan.get("selected_plan_type") or plan.get("type"),
-                "plan.grace_started_at": now,
-                "plan.grace_ends_at": grace_ends_at,
                 "plan.expired_at": now,
+                "plan.viewing_applied": True,
+                "plan.viewing_applied_at": now,
+                "plan.grace_ends_at": None,
+                "plan.grace_started_at": None,
+                "is_locked": True,
+                "lock_reason": "plan_expired",
                 "updated_at": now,
             }
         },
         return_document=ReturnDocument.AFTER,
     )
-    return updated or shop
+    result = updated or shop
+    sync_owner_viewer_from_shop(result)
+    return close_storefront_if_viewer_due(result)
 
 
 def expire_shop_grace_period_if_needed(shop: dict) -> dict:
@@ -1120,6 +1076,7 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
         return_document=ReturnDocument.AFTER,
     )
     # Selecting a plan for this shop does not unlock sibling shops.
+    # Sync owner account to the paid plan so Owners admin matches Shops.
     # Never demote platform admins to owner.
     owner_id = str((updated or shop).get("owner_user_id") or "")
     if owner_id:
@@ -1130,7 +1087,17 @@ def select_plan_for_shop(store_id: str, plan_type: PlanType) -> PlanSummary:
                 {
                     "$set": {
                         "role": UserRole.owner.value,
+                        "plan.type": plan_type.value,
+                        "plan.status": PlanStatus.active.value,
+                        "plan.started_at": plan_document["started_at"],
+                        "plan.ends_at": ends_at,
+                        "plan.grace_ends_at": None,
+                        "plan.grace_started_at": None,
                         "plan.viewing_applied": False,
+                        "plan.viewing_applied_at": None,
+                        "plan.selected_plan_type": plan_type.value,
+                        "plan.selected_at": now,
+                        "plan.trial_used": True,
                         "updated_at": now,
                     }
                 },
