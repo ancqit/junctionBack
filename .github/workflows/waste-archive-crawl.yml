@@ -1,0 +1,72 @@
+# jEarth waste archive crawler
+# - Runs once when this workflow / crawler code lands on main (PR merge)
+# - Then weekly (Sunday 03:00 UTC ≈ Sunday 08:30 IST)
+# Calls POST /internal/jobs/waste-archive-crawl on the live API.
+#
+# Required repo secrets:
+#   JUNCTIONBACK_URL  e.g. https://junctionback.onrender.com
+#   CRON_SECRET       same value as the API's CRON_SECRET env
+
+name: Waste archive crawl
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/waste_crawler.py"
+      - "app/earth_waste.py"
+      - "app/internal_jobs.py"
+      - "scripts/waste_archive_crawler.py"
+      - ".github/workflows/waste-archive-crawl.yml"
+  schedule:
+    # Weekly — Sunday 03:00 UTC
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      force_seed:
+        description: "Overwrite seed documents (force_seed=1)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger waste-archive-crawl
+        env:
+          JUNCTIONBACK_URL: ${{ secrets.JUNCTIONBACK_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FORCE_SEED: ${{ github.event.inputs.force_seed || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${JUNCTIONBACK_URL:-}" ] || [ -z "${CRON_SECRET:-}" ]; then
+            echo "Missing JUNCTIONBACK_URL or CRON_SECRET repo secrets."
+            exit 1
+          fi
+          BASE="${JUNCTIONBACK_URL%/}"
+          QS=""
+          if [ "${FORCE_SEED}" = "true" ]; then
+            QS="?force_seed=true"
+          fi
+          echo "POST ${BASE}/internal/jobs/waste-archive-crawl${QS}"
+          # After merge, Render may still be deploying — retry a few times.
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -sS -o /tmp/crawl.json -w "%{http_code}" \
+              -X POST \
+              -H "X-Cron-Secret: ${CRON_SECRET}" \
+              -H "Accept: application/json" \
+              "${BASE}/internal/jobs/waste-archive-crawl${QS}" || true)
+            echo "Attempt ${i}: HTTP ${code}"
+            if [ "${code}" = "200" ]; then
+              cat /tmp/crawl.json
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Crawl failed after retries"
+          cat /tmp/crawl.json || true
+          exit 1

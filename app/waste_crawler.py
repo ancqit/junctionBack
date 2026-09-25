@@ -9,6 +9,10 @@ Waste archive crawler helper for jEarth.
 Run via:
   python -m scripts.waste_archive_crawler
   POST /internal/jobs/waste-archive-crawl  (X-Cron-Secret)
+
+Schedule (GitHub Actions):
+  - once when crawler code merges to main
+  - weekly thereafter (Sunday 03:00 UTC)
 """
 
 from __future__ import annotations

@@ -70,7 +70,10 @@ def cron_waste_archive_crawl(
     x_cron_secret: Annotated[str | None, Header(alias="X-Cron-Secret")] = None,
     force_seed: bool = False,
 ) -> WasteArchiveCrawlResponse:
-    """Periodic jEarth waste archive update: seed + curated Wikipedia + DuckDuckGo enrich."""
+    """Weekly jEarth waste archive update: seed + curated Wikipedia + DuckDuckGo enrich.
+
+    Triggered by GitHub Actions (Sunday 03:00 UTC) and once when crawler code merges to main.
+    """
     _require_cron_secret(x_cron_secret)
     result = run_waste_archive_crawl(force_seed=force_seed, enrich=True)
     return WasteArchiveCrawlResponse(**result)
