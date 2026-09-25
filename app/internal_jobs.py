@@ -43,7 +43,10 @@ class EnforcePlansResponse(BaseModel):
 def cron_enforce_plans(
     x_cron_secret: Annotated[str | None, Header(alias="X-Cron-Secret")] = None,
 ) -> EnforcePlansResponse:
-    """Daily enforce: trial→selected plan after 15d, else expire→viewer→close; viewer-day logs."""
+    """Weekly enforce: trial→selected plan after 15d, else expire→viewer→close; viewer-day logs.
+
+    Triggered by GitHub Actions (Sunday 04:00 UTC) or workflow_dispatch.
+    """
     _require_cron_secret(x_cron_secret)
     try:
         ensure_viewer_day_log_indexes()
