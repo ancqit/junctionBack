@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .plan_enforcement import enforce_plans_once, ensure_viewer_day_log_indexes
 from .plan_service import VIEWER_CLOSE_DAYS
+from .waste_crawler import run_waste_archive_crawl
 
 router = APIRouter(prefix="/internal/jobs", tags=["internal-jobs"])
 
@@ -50,3 +51,26 @@ def cron_enforce_plans(
         pass
     result = enforce_plans_once()
     return EnforcePlansResponse(**result, viewer_close_days=VIEWER_CLOSE_DAYS)
+
+
+class WasteArchiveCrawlResponse(BaseModel):
+    ran_at: str
+    seeded: int = 0
+    updated: int = 0
+    total: int = 0
+    curated_ok: int = 0
+    curated_fail: int = 0
+    enrich_ok: int = 0
+    enrich_fail: int = 0
+    archive_count: int = 0
+
+
+@router.post("/waste-archive-crawl", response_model=WasteArchiveCrawlResponse)
+def cron_waste_archive_crawl(
+    x_cron_secret: Annotated[str | None, Header(alias="X-Cron-Secret")] = None,
+    force_seed: bool = False,
+) -> WasteArchiveCrawlResponse:
+    """Periodic jEarth waste archive update: seed + curated Wikipedia + DuckDuckGo enrich."""
+    _require_cron_secret(x_cron_secret)
+    result = run_waste_archive_crawl(force_seed=force_seed, enrich=True)
+    return WasteArchiveCrawlResponse(**result)
