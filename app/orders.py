@@ -2,20 +2,25 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 import secrets
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 
 from .access_control import (
     AuthenticatedUser,
     apply_store_filter,
+    get_order_or_404,
     get_product_or_404,
     get_shop_by_store_id,
     require_order_access,
     require_store_access,
 )
 from .database import orders
+from .login import get_current_user
+from .order_bill import bill_filename, bill_input_from_order, render_order_bill
 from .rate_limit import RATE_LIMIT_GUEST_ORDERS, limiter
 from .session import CatalogReader, is_junction_session
 from .utils import parse_object_id
@@ -23,6 +28,11 @@ from .utils import parse_object_id
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 JUNCTION_TODAY_SOURCE = "junction.today"
+bill_bearer = HTTPBearer(auto_error=False)
+
+
+def new_bill_token() -> str:
+    return secrets.token_urlsafe(24)
 
 
 class OrderStatus(str, Enum):
@@ -156,6 +166,10 @@ class Order(OrderCreate):
     order_number: str
     created_at: datetime
     updated_at: datetime
+    bill_token: str | None = Field(
+        default=None,
+        description="Only returned when the order is created; opens GET /orders/{id}/bill.pdf without a login.",
+    )
 
 
 def generate_order_number() -> str:
@@ -173,7 +187,7 @@ def serialize_line_item(item: dict) -> dict:
     }
 
 
-def serialize_order(document: dict) -> Order:
+def serialize_order(document: dict, *, include_bill_token: bool = False) -> Order:
     items = [serialize_line_item(item) for item in document["items"]]
     return Order(
         id=str(document["_id"]),
@@ -189,6 +203,7 @@ def serialize_order(document: dict) -> Order:
         source=document.get("source"),
         created_at=document["created_at"],
         updated_at=document["updated_at"],
+        bill_token=document.get("bill_token") if include_bill_token else None,
     )
 
 
@@ -259,6 +274,50 @@ def get_order(order_id: str, current_user: AuthenticatedUser) -> Order:
     return serialize_order(document)
 
 
+@router.get(
+    "/{order_id}/bill.pdf",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+@limiter.limit(RATE_LIMIT_GUEST_ORDERS)
+def download_order_bill(
+    request: Request,
+    order_id: str,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bill_bearer)],
+    token: str | None = Query(default=None, max_length=128),
+    lang: Literal["en", "hi"] = "en",
+) -> Response:
+    """
+    The Junction order bill (PDF) shared by junction.today, the shop back-office and junction.earth.
+    - Customer: pass the `bill_token` returned when the order was created.
+    - Owner/admin: send the usual Bearer JWT for the order's shop.
+    """
+    document = get_order_or_404(order_id)
+    stored_token = str(document.get("bill_token") or "")
+    if not (token and stored_token and secrets.compare_digest(token, stored_token)):
+        if credentials is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Bill token or shop login required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        require_store_access(get_current_user(credentials.credentials), document["store_id"])
+
+    try:
+        shop = get_shop_by_store_id(document["store_id"])
+    except HTTPException:
+        shop = None
+    pdf = render_order_bill(bill_input_from_order(document, shop), lang)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{bill_filename(document.get("order_number") or order_id)}"',
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.post("", response_model=Order, status_code=status.HTTP_201_CREATED)
 @limiter.limit(RATE_LIMIT_GUEST_ORDERS)
 def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) -> Order:
@@ -288,6 +347,7 @@ def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) ->
     document = {
         **data,
         "order_number": generate_order_number(),
+        "bill_token": new_bill_token(),
         "created_at": now,
         "updated_at": now,
     }
@@ -310,7 +370,7 @@ def create_order(request: Request, payload: OrderCreate, auth: CatalogReader) ->
             # Order already saved — contact index is best-effort.
             pass
 
-    return serialize_order(document)
+    return serialize_order(document, include_bill_token=True)
 
 
 @router.patch("/{order_id}", response_model=Order)
