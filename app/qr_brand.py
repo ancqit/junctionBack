@@ -12,6 +12,7 @@ import qrcode
 from qrcode.constants import ERROR_CORRECT_H
 
 BRAND_NAME = "Junction"
+BUNDLED_FONT_DIR = Path(__file__).resolve().parent / "fonts"
 JUNCTION_TODAY_URL = os.getenv("JUNCTION_TODAY_URL", "https://junction.today").rstrip("/")
 
 FOREST = (25, 75, 49)
@@ -137,11 +138,13 @@ def _font_path(*candidates: str) -> str | None:
 
 
 def _load_font(size: int, *, bold: bool = False, devanagari: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    weight = "Bold" if bold else "Regular"
     if devanagari:
         path = _font_path(
             "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Medium.ttf",
             "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+            str(BUNDLED_FONT_DIR / f"NotoSansDevanagari-{weight}.ttf"),
         )
         if path:
             return ImageFont.truetype(path, size)
@@ -149,6 +152,7 @@ def _load_font(size: int, *, bold: bool = False, devanagari: bool = False) -> Im
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        str(BUNDLED_FONT_DIR / f"NotoSans-{weight}.ttf"),
     )
     if path:
         return ImageFont.truetype(path, size)
@@ -175,7 +179,7 @@ def draw_brand_mark(size: int = 160) -> Image.Image:
     return img
 
 
-def _qr_image(payload: str, box_size: int = 12) -> Image.Image:
+def qr_image(payload: str, box_size: int = 12) -> Image.Image:
     qr = qrcode.QRCode(
         version=None,
         error_correction=ERROR_CORRECT_H,
@@ -292,7 +296,7 @@ def compose_poster_art(
         draw.text(((POSTER_W - tw) / 2, y), row, font=place_font, fill=MUTED)
         y += 32
 
-    qr = _qr_image(payload, box_size=14)
+    qr = qr_image(payload, box_size=14)
     qr_size = 620
     qr = qr.resize((qr_size, qr_size), Image.Resampling.NEAREST)
     card = Image.new("RGB", (qr_size + 48, qr_size + 48), WHITE)

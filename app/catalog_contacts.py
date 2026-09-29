@@ -23,6 +23,7 @@ from .login import (
     require_gcp_otp_configuration,
     verify_password,
 )
+from .orders import new_bill_token
 from .rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter(prefix="/auth/catalog-contacts", tags=["catalog-contacts"])
@@ -78,6 +79,7 @@ class CatalogContactOrder(BaseModel):
     currency: str
     status: str
     created_at: datetime
+    bill_token: str | None = None
 
 
 MPIN_PATTERN = r"^\d{4,6}$"
@@ -324,6 +326,10 @@ def list_catalog_contact_orders(
         if order_email and email_norm and order_email != email_norm:
             continue
         billing = document.get("billing") or {}
+        bill_token = document.get("bill_token")
+        if not bill_token:
+            bill_token = new_bill_token()
+            orders.update_one({"_id": document["_id"]}, {"$set": {"bill_token": bill_token}})
         results.append(
             CatalogContactOrder(
                 id=str(document["_id"]),
@@ -336,6 +342,7 @@ def list_catalog_contact_orders(
                 currency=str(billing.get("currency") or "INR"),
                 status=str(document.get("status") or "pending"),
                 created_at=document["created_at"],
+                bill_token=bill_token,
             )
         )
     return results
