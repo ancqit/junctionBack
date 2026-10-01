@@ -65,6 +65,8 @@ class WasteArchiveCrawlResponse(BaseModel):
     curated_fail: int = 0
     enrich_ok: int = 0
     enrich_fail: int = 0
+    misses_learned: int = 0
+    misses_not_found: int = 0
     archive_count: int = 0
 
 
@@ -73,7 +75,7 @@ def cron_waste_archive_crawl(
     x_cron_secret: Annotated[str | None, Header(alias="X-Cron-Secret")] = None,
     force_seed: bool = False,
 ) -> WasteArchiveCrawlResponse:
-    """Weekly jEarth waste archive update: seed + curated Wikipedia + DuckDuckGo enrich.
+    """Weekly jEarth waste archive update: seed + curated Wikipedia + DuckDuckGo enrich + unanswered searches.
 
     Triggered by GitHub Actions (Sunday 03:00 UTC) and once when crawler code merges to main.
     """
