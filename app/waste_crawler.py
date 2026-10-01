@@ -260,7 +260,13 @@ class _TextExtractor(HTMLParser):
             self.parts.append(text)
 
 
+_indexes_ready = False
+
+
 def ensure_waste_archive_indexes() -> None:
+    global _indexes_ready
+    if _indexes_ready:
+        return
     waste_archive.create_index("id", unique=True)
     waste_archive.create_index(
         [
@@ -274,6 +280,7 @@ def ensure_waste_archive_indexes() -> None:
         name="waste_archive_text",
         default_language="none",
     )
+    _indexes_ready = True
 
 
 def classify_stream(text: str, fallback: str = "reject") -> str:
@@ -473,16 +480,20 @@ def enrich_seeds_from_web(limit: int = 20) -> dict[str, int]:
 
 
 def run_waste_archive_crawl(*, force_seed: bool = False, enrich: bool = True) -> dict[str, Any]:
-    """Full helper pass: indexes → seed → curated crawl → optional web enrich."""
+    """Full helper pass: indexes → seed → curated crawl → optional web enrich → retry search misses."""
+    from .waste_learn import crawl_search_misses
+
     ensure_waste_archive_indexes()
     seed_stats = seed_archive(force=force_seed)
     curated = crawl_curated_sources()
     enriched = enrich_seeds_from_web() if enrich else {"enrich_ok": 0, "enrich_fail": 0}
+    misses = crawl_search_misses()
     return {
         "ran_at": _now().isoformat(),
         **seed_stats,
         **curated,
         **enriched,
+        **misses,
         "archive_count": waste_archive.count_documents({}),
     }
 
@@ -527,22 +538,22 @@ def search_waste_archive(query: str, *, lang: str = "en", limit: int = 12) -> li
         ).limit(limit)
         rows = list(cursor)
 
-    results: list[dict[str, Any]] = []
-    for row in rows:
-        name = row.get("name_hi") if lang == "hi" else row.get("name_en")
-        dispose = row.get("dispose_hi") if lang == "hi" else row.get("dispose_en")
-        snippet = row.get("snippet_hi") if lang == "hi" else row.get("snippet_en")
-        if not snippet and isinstance(dispose, list):
-            snippet = " ".join(str(x) for x in dispose)[:280]
-        results.append(
-            {
-                "id": row.get("id"),
-                "title": name or row.get("name_en") or row.get("id"),
-                "stream": row.get("stream") or "reject",
-                "snippet": snippet or "",
-                "dispose": dispose if isinstance(dispose, list) else [],
-                "sources": row.get("sources") or [],
-                "score": row.get("score"),
-            }
-        )
-    return results
+    return [format_hit(row, lang=lang) for row in rows]
+
+
+def format_hit(row: dict[str, Any], *, lang: str = "en") -> dict[str, Any]:
+    name = row.get("name_hi") if lang == "hi" else row.get("name_en")
+    dispose = row.get("dispose_hi") if lang == "hi" else row.get("dispose_en")
+    snippet = row.get("snippet_hi") if lang == "hi" else row.get("snippet_en")
+    if not snippet and isinstance(dispose, list):
+        snippet = " ".join(str(x) for x in dispose)[:280]
+    return {
+        "id": row.get("id"),
+        "title": name or row.get("name_en") or row.get("id"),
+        "stream": row.get("stream") or "reject",
+        "snippet": snippet or "",
+        "dispose": dispose if isinstance(dispose, list) else [],
+        "sources": row.get("sources") or [],
+        "score": row.get("score"),
+        "origin": row.get("origin"),
+    }

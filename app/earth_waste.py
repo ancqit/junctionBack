@@ -6,8 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 
-from .waste_crawler import search_waste_archive, seed_archive, ensure_waste_archive_indexes
+from .waste_crawler import ensure_waste_archive_indexes, format_hit, search_waste_archive, seed_archive
+from .waste_learn import learn_on_miss
 
 router = APIRouter(prefix="/earth/waste", tags=["earth-waste"])
 
@@ -25,6 +27,7 @@ class WasteSearchHit(BaseModel):
     dispose: list[str] = Field(default_factory=list)
     sources: list[WasteSource] = Field(default_factory=list)
     score: float | None = None
+    origin: str | None = None
 
 
 class WasteSearchResponse(BaseModel):
@@ -39,7 +42,11 @@ def earth_waste_search(
     lang: str = Query(default="en", pattern="^(en|hi)$"),
     limit: int = Query(default=12, ge=1, le=30),
 ) -> WasteSearchResponse:
-    """Google-like waste search — archive loaded from Mongo, refreshed by the crawler helper."""
+    """Google-like waste search over the Mongo archive.
+
+    A miss is counted and, when allowed, looked up on Wikipedia; a confident
+    answer is stored in the archive and returned straight away.
+    """
     from .database import waste_archive
 
     try:
@@ -52,6 +59,13 @@ def earth_waste_search(
     except Exception:
         pass
     hits = search_waste_archive(q, lang=lang, limit=limit)
+    if not hits:
+        try:
+            learned = learn_on_miss(q)
+        except PyMongoError:
+            learned = None
+        if learned:
+            hits = [format_hit(learned, lang=lang)]
     return WasteSearchResponse(
         query=q.strip(),
         lang=lang,
