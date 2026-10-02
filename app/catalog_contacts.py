@@ -6,10 +6,13 @@ initial OTP setup (forgot MPIN re-runs OTP).
 """
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+import jwt
+from bson import ObjectId
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo import ReturnDocument
 
@@ -18,6 +21,8 @@ from .database import catalog_contacts, catalog_otp_requests, orders
 from .login import (
     GCP_IDENTITY_PLATFORM_API_KEY,
     GCP_VERIFY_OTP_URL,
+    JWT_EXPIRE_MINUTES,
+    JWT_SECRET,
     gcp_error,
     hash_password,
     require_gcp_otp_configuration,
@@ -125,6 +130,75 @@ class CatalogMpinAuthResponse(BaseModel):
     email: str
     has_mpin: bool = True
     message: str = "Authenticated"
+    display_name: str | None = None
+    # Customer token for MPIN-gated features (jEarth Home trash); sent back as X-Junction-Contact.
+    access_token: str | None = None
+    expires_in: int | None = None
+
+
+CONTACT_TOKEN_SCOPE = "contact"
+
+
+def _mpin_version(doc: dict) -> int:
+    set_at = doc.get("mpin_set_at")
+    if not isinstance(set_at, datetime):
+        return 0
+    return int((set_at if set_at.tzinfo else set_at.replace(tzinfo=timezone.utc)).timestamp())
+
+
+def create_contact_token(doc: dict) -> str | None:
+    """Signed customer token; resetting the MPIN invalidates every earlier token."""
+    if len(JWT_SECRET) < 32:
+        return None
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": str(doc["_id"]),
+            "scope": CONTACT_TOKEN_SCOPE,
+            "pv": _mpin_version(doc),
+            "iat": now,
+            "exp": now + timedelta(minutes=JWT_EXPIRE_MINUTES),
+        },
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
+def get_contact(
+    x_junction_contact: Annotated[str | None, Header(alias="X-Junction-Contact")] = None,
+) -> dict:
+    token = (x_junction_contact or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token or len(JWT_SECRET) < 32:
+        raise HTTPException(status_code=401, detail="Unlock with your MPIN first")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="Session expired. Unlock with your MPIN again") from exc
+    if payload.get("scope") != CONTACT_TOKEN_SCOPE or not ObjectId.is_valid(str(payload.get("sub") or "")):
+        raise HTTPException(status_code=401, detail="Unlock with your MPIN first")
+    doc = catalog_contacts.find_one({"_id": ObjectId(payload["sub"])})
+    if not doc or not doc.get("verified") or payload.get("pv") != _mpin_version(doc):
+        raise HTTPException(status_code=401, detail="Session expired. Unlock with your MPIN again")
+    return doc
+
+
+ContactAuth = Annotated[dict, Depends(get_contact)]
+
+
+def contact_auth_response(doc: dict, *, email: str, message: str) -> CatalogMpinAuthResponse:
+    token = create_contact_token(doc)
+    return CatalogMpinAuthResponse(
+        verified=True,
+        phone_number=doc["phone_number"],
+        email=email,
+        has_mpin=True,
+        message=message,
+        display_name=doc.get("display_name"),
+        access_token=token,
+        expires_in=JWT_EXPIRE_MINUTES * 60 if token else None,
+    )
 
 
 def upsert_catalog_contact(
@@ -229,13 +303,7 @@ def catalog_mpin_login(request: Request, payload: CatalogMpinLoginRequest) -> Ca
         email = email or str(payload.email).strip().lower()
     if not email:
         raise HTTPException(status_code=401, detail="Contact is missing email; reset with OTP")
-    return CatalogMpinAuthResponse(
-        verified=True,
-        phone_number=doc["phone_number"],
-        email=email,
-        has_mpin=True,
-        message="MPIN verified",
-    )
+    return contact_auth_response(doc, email=email, message="MPIN verified")
 
 
 @router.post("/mpin/setup", response_model=CatalogMpinAuthResponse)
@@ -295,13 +363,7 @@ def catalog_mpin_setup(request: Request, payload: CatalogMpinSetupRequest) -> Ca
     )
     if doc is None:
         raise HTTPException(status_code=500, detail="Could not save contact MPIN")
-    return CatalogMpinAuthResponse(
-        verified=True,
-        phone_number=doc["phone_number"],
-        email=email_norm,
-        has_mpin=True,
-        message="MPIN saved",
-    )
+    return contact_auth_response(doc, email=email_norm, message="MPIN saved")
 
 
 @router.post("/orders", response_model=list[CatalogContactOrder])

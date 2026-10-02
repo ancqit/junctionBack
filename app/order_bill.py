@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fpdf import FPDF
-
+from .junction_pdf import GOLD_SOFT, RULE, JunctionDocument
 from .qr_brand import (
-    BUNDLED_FONT_DIR as FONT_DIR,
     FOREST,
     GOLD,
     INK,
@@ -17,18 +14,10 @@ from .qr_brand import (
     MUTED,
     WHITE,
     build_junction_url,
-    qr_image,
 )
 
-PAPER = (244, 240, 230)
-GOLD_SOFT = (247, 233, 184)
-RULE = (200, 196, 184)
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
-PAGE_MARGIN = 48
-HEADER_H = 72
-FOOTER_H = 104
-QR_SIZE = 76
 SIGNATURE_H = 96
 
 DEFAULT_SLOGAN = {
@@ -244,101 +233,20 @@ def bill_filename(order_number: str) -> str:
     return f"junction-bill-{safe}.pdf"
 
 
-class _BillDocument(FPDF):
+class _BillDocument(JunctionDocument):
     def __init__(self, bill: BillInput, lang: str) -> None:
-        super().__init__(orientation="portrait", unit="pt", format="A4")
         self.bill = bill
-        self.lang = lang
         self.labels = LABELS[lang]
-        self.slogan = DEFAULT_SLOGAN[lang]
-        qr_png = io.BytesIO()
-        qr_image(bill.qr_url).convert("RGB").save(qr_png, format="PNG")
-        self.qr_png = qr_png.getvalue()
-
-        self.add_font("sans", "", FONT_DIR / "NotoSans-Regular.ttf")
-        self.add_font("sans", "B", FONT_DIR / "NotoSans-Bold.ttf")
-        self.add_font("serif", "I", FONT_DIR / "NotoSerif-Italic.ttf")
-        self.add_font("deva", "", FONT_DIR / "NotoSansDevanagari-Regular.ttf")
-        self.add_font("deva", "B", FONT_DIR / "NotoSansDevanagari-Bold.ttf")
-        self.set_fallback_fonts(["deva"], exact_match=False)
-        self.set_text_shaping(True)
-
-        self.set_margins(PAGE_MARGIN, HEADER_H + 28, PAGE_MARGIN)
-        self.set_auto_page_break(auto=True, margin=FOOTER_H + 16)
-        self.alias_nb_pages()
-        self.set_title(f"{LABELS['en']['title']} {bill.order_number}")
-        self.set_author(bill.shop_name)
-        self.set_creator(bill.host)
-
-    @property
-    def content_w(self) -> float:
-        return self.w - self.l_margin - self.r_margin
-
-    def _font(self, size: float, style: str = "", color: tuple[int, int, int] = INK, family: str = "sans") -> None:
-        # fpdf2 skips re-selecting an unchanged font even after a Devanagari fallback
-        # fragment switched the stream font, which garbles the next Latin run.
-        self.set_font("deva" if family != "deva" else "sans", "", size)
-        self.set_font(family, style, size)
-        self.set_text_color(*color)
-
-    def _mark(self, x: float, y: float, size: float) -> None:
-        self.set_fill_color(*GOLD)
-        self.rect(x, y, size, size, style="F", round_corners=True, corner_radius=size / 3)
-        self._font(size * 0.62, "B", FOREST)
-        self.set_xy(x, y)
-        self.cell(size, size, "J", align="C")
-
-    def header(self) -> None:
-        self.set_fill_color(*PAPER)
-        self.rect(0, 0, self.w, self.h, style="F")
-        self.set_fill_color(*FOREST)
-        self.rect(0, 0, self.w, HEADER_H, style="F")
-        self._mark(PAGE_MARGIN, 16, 40)
-        self._font(20, "B", GOLD)
-        self.set_xy(PAGE_MARGIN + 52, 16)
-        self.cell(200, 22, "Junction")
-        self._font(10, "", GOLD)
-        self.set_xy(PAGE_MARGIN + 52, 38)
-        self.cell(200, 16, self.bill.host)
-        self._font(10, "B", GOLD)
-        self.set_xy(self.w - PAGE_MARGIN - 240, 22)
-        self.cell(240, 14, f"{self.labels['bill_no']}  {self.bill.order_number}", align="R")
-        self._font(9, "", GOLD)
-        self.set_xy(self.w - PAGE_MARGIN - 240, 38)
-        self.cell(240, 14, f"{self.page_no()}/{{nb}}", align="R")
-        self.set_xy(self.l_margin, self.t_margin)
-
-    def footer(self) -> None:
-        top = self.h - FOOTER_H
-        self.set_fill_color(*FOREST)
-        self.rect(0, top, self.w, FOOTER_H, style="F")
-        qr_y = top + (FOOTER_H - QR_SIZE) / 2
-        self.set_fill_color(*WHITE)
-        self.rect(PAGE_MARGIN - 4, qr_y - 4, QR_SIZE + 8, QR_SIZE + 8, style="F", round_corners=True, corner_radius=6)
-        self.image(io.BytesIO(self.qr_png), PAGE_MARGIN, qr_y, QR_SIZE, QR_SIZE, link=self.bill.qr_url)
-        text_x = PAGE_MARGIN + QR_SIZE + 20
-        self._font(12, "I", GOLD, family="serif")
-        self.set_xy(text_x, qr_y + 10)
-        self.cell(self.w - text_x - PAGE_MARGIN, 18, self.slogan)
-        self._font(10, "", GOLD)
-        self.set_xy(text_x, qr_y + 34)
-        self.cell(self.w - text_x - PAGE_MARGIN, 14, self.bill.host)
-        self._font(8, "", GOLD)
-        self.set_xy(text_x, qr_y + 52)
-        self.cell(self.w - text_x - PAGE_MARGIN, 12, self.labels["scan"])
-
-    def _divider(self, gap: float = 10) -> None:
-        y = self.get_y() + gap
-        self.set_draw_color(*FOREST)
-        self.set_line_width(0.9)
-        self.line(self.l_margin, y, self.w - self.r_margin, y)
-        self.set_y(y + gap + 4)
-
-    def _ensure_room(self, height: float) -> bool:
-        if self.get_y() + height > self.page_break_trigger:
-            self.add_page()
-            return True
-        return False
+        super().__init__(
+            lang=lang,
+            qr_url=bill.qr_url,
+            host=bill.host,
+            slogan=DEFAULT_SLOGAN[lang],
+            scan_label=self.labels["scan"],
+            header_ref=f"{self.labels['bill_no']}  {bill.order_number}",
+            title=f"{LABELS['en']['title']} {bill.order_number}",
+            author=bill.shop_name,
+        )
 
     def _title_block(self) -> None:
         self._font(24, "B", FOREST)
