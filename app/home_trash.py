@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
-from .catalog_contacts import ContactAuth
+from .catalog_contacts import ContactAuth, contact_display_name
 from .database import home_trash, waste_archive
 from .home_trash_pdf import (
     HomeTrashInput,
@@ -178,7 +178,7 @@ def home_trash_pdf(
     items = [_serialize(doc) for doc in _items_for(contact)]
     now = datetime.now(timezone.utc)
     data = HomeTrashInput(
-        display_name=contact.get("display_name"),
+        display_name=contact_display_name(contact),
         phone_number=contact["phone_number"],
         created_at=now,
         items=[

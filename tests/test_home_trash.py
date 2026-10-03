@@ -11,6 +11,7 @@ from app import home_trash as home_trash_module
 from app.catalog_contacts import create_contact_token
 from app.login import hash_password
 from app.main import app
+from app.rate_limit import limiter
 
 SECRET = "test-secret-that-is-at-least-32-chars-long"
 PHONE = "+919812345678"
@@ -61,6 +62,7 @@ def db():
         patch.object(home_trash_module, "home_trash", bucket),
         patch.object(home_trash_module, "waste_archive", archive),
         patch.object(home_trash_module, "_indexes_ready", False),
+        patch.object(limiter, "enabled", False),
     ):
         yield {"contacts": contacts, "archive": archive, "bucket": bucket}
 
@@ -224,3 +226,100 @@ def test_empty_bucket_still_downloads(db, client):
     response = client.get("/earth/home-trash/pdf", headers=headers)
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF")
+
+
+NEW_PHONE = "+919800000042"
+
+
+def _create(client: TestClient, phone: str = NEW_PHONE, mpin: str = "1357", name: str | None = "Asha"):
+    body = {"phone_number": phone, "mpin": mpin}
+    if name:
+        body["display_name"] = name
+    return client.post("/auth/catalog-contacts/mpin/create", json=body)
+
+
+def _unlock(client: TestClient, phone: str, mpin: str):
+    return client.post("/auth/catalog-contacts/mpin/unlock", json={"phone_number": phone, "mpin": mpin})
+
+
+def test_open_create_gives_a_working_home_trash_without_email(db, client):
+    response = _create(client)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["verified"] is False
+    assert body["email"] == ""
+    assert body["display_name"] == "Asha"
+    headers = _auth(body["access_token"])
+    assert client.post("/earth/home-trash", json={"entry_id": "peel"}, headers=headers).status_code == 200
+    assert client.get("/earth/home-trash/pdf", headers=headers).content.startswith(b"%PDF")
+
+    unlocked = _unlock(client, NEW_PHONE, "1357")
+    assert unlocked.status_code == 200
+    assert client.get("/earth/home-trash", headers=_auth(unlocked.json()["access_token"])).json()["count"] == 1
+
+
+def test_open_create_never_overwrites_an_existing_mpin(db, client):
+    assert _create(client, phone=PHONE).status_code == 409
+    assert _create(client).status_code == 200
+    assert _create(client, mpin="9999").status_code == 409
+    assert _unlock(client, NEW_PHONE, "1357").status_code == 200
+
+
+def test_open_create_refuses_verified_contacts_without_mpin(db, client):
+    db["contacts"].insert_one({"phone_number": NEW_PHONE, "email": "v@example.com", "verified": True})
+    assert _create(client).status_code == 409
+
+
+def test_open_create_on_order_contact_hides_order_email_and_name(db, client):
+    db["contacts"].insert_one(
+        {"phone_number": NEW_PHONE, "email": "buyer@example.com", "display_name": "Order Name", "order_ids": ["x"]}
+    )
+    body = _create(client, name=None).json()
+    assert body["email"] == ""
+    assert body["display_name"] is None
+    stored = db["contacts"].find_one({"phone_number": NEW_PHONE})
+    assert stored["display_name"] == "Order Name"
+    assert stored["email"] == "buyer@example.com"
+
+
+def test_self_set_account_cannot_use_jtoday_login(db, client):
+    _create(client)
+    response = client.post("/auth/catalog-contacts/mpin/login", json={"phone_number": NEW_PHONE, "mpin": "1357"})
+    assert response.status_code == 401
+
+
+def test_unlock_accepts_jtoday_mpin(db, client):
+    body = _unlock(client, PHONE, MPIN).json()
+    assert body["verified"] is True
+    assert body["email"] == "reena@example.com"
+    assert body["access_token"]
+
+
+def test_five_wrong_mpins_lock_the_phone_then_unlock_after_expiry(db, client):
+    codes = [_unlock(client, PHONE, "0000").status_code for _ in range(5)]
+    assert codes == [401, 401, 401, 401, 429]
+    locked = _unlock(client, PHONE, MPIN)
+    assert locked.status_code == 429
+    assert "Try again" in locked.json()["detail"]
+
+    db["contacts"].update_one(
+        {"phone_number": PHONE}, {"$set": {"mpin_locked_until": datetime(2020, 1, 1, tzinfo=timezone.utc)}}
+    )
+    assert _unlock(client, PHONE, MPIN).status_code == 200
+    stored = db["contacts"].find_one({"phone_number": PHONE})
+    assert "mpin_locked_until" not in stored
+    assert "mpin_failed_count" not in stored
+
+
+def test_jtoday_login_shares_the_lockout(db, client):
+    for _ in range(5):
+        client.post("/auth/catalog-contacts/mpin/login", json={"phone_number": PHONE, "mpin": "0000"})
+    response = client.post("/auth/catalog-contacts/mpin/login", json={"phone_number": PHONE, "mpin": MPIN})
+    assert response.status_code == 429
+
+
+def test_a_correct_mpin_resets_the_wrong_count(db, client):
+    for _ in range(4):
+        _unlock(client, PHONE, "0000")
+    assert _unlock(client, PHONE, MPIN).status_code == 200
+    assert _unlock(client, PHONE, "0000").status_code == 401
