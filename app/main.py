@@ -47,6 +47,7 @@ from .qr import router as qr_router
 from .internal_jobs import router as internal_jobs_router
 from .earth_waste import router as earth_waste_router
 from .home_trash import router as home_trash_router
+from .junction_id import router as junction_id_router
 
 _openapi_enabled = os.getenv("OPENAPI_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -137,6 +138,7 @@ _routers = (
     internal_jobs_router,
     earth_waste_router,
     home_trash_router,
+    junction_id_router,
 )
 for _router in _routers:
     app.include_router(_router)
