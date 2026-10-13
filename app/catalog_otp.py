@@ -176,15 +176,14 @@ def request_catalog_otp(request: Request, payload: CatalogOtpRequest) -> Catalog
     )
 
 
-@router.post("/verify", response_model=CatalogOtpVerifyResponse)
-@limiter.limit(RATE_LIMIT_AUTH)
-def verify_catalog_otp(request: Request, payload: CatalogOtpVerifyRequest) -> CatalogOtpVerifyResponse:
+def confirm_catalog_otp(phone_number: str, session_info: str, otp: str) -> dict:
+    """Check an SMS code from `/request` with GCP and use it up; returns the stored request."""
     require_gcp_otp_configuration()
     now = datetime.now(timezone.utc)
-    session_hash = hashlib.sha256(payload.session_info.encode()).hexdigest()
+    session_hash = hashlib.sha256(session_info.encode()).hexdigest()
     stored = catalog_otp_requests.find_one(
         {
-            "phone_number": payload.phone_number,
+            "phone_number": phone_number,
             "session_hash": session_hash,
             "expires_at": {"$gt": now},
         }
@@ -196,7 +195,7 @@ def verify_catalog_otp(request: Request, payload: CatalogOtpVerifyRequest) -> Ca
         response = httpx.post(
             GCP_VERIFY_OTP_URL,
             params={"key": GCP_IDENTITY_PLATFORM_API_KEY},
-            json={"sessionInfo": payload.session_info, "code": payload.otp},
+            json={"sessionInfo": session_info, "code": otp},
             timeout=15.0,
         )
     except httpx.HTTPError as exc:
@@ -205,10 +204,17 @@ def verify_catalog_otp(request: Request, payload: CatalogOtpVerifyRequest) -> Ca
         raise gcp_error(response)
 
     verified_phone = response.json().get("phoneNumber")
-    if verified_phone != payload.phone_number:
+    if verified_phone != phone_number:
         raise HTTPException(status_code=401, detail="GCP phone verification did not match the request")
 
     catalog_otp_requests.delete_one({"_id": stored["_id"]})
+    return stored
+
+
+@router.post("/verify", response_model=CatalogOtpVerifyResponse)
+@limiter.limit(RATE_LIMIT_AUTH)
+def verify_catalog_otp(request: Request, payload: CatalogOtpVerifyRequest) -> CatalogOtpVerifyResponse:
+    stored = confirm_catalog_otp(payload.phone_number, payload.session_info, payload.otp)
 
     contact_saved = False
     if payload.email:
