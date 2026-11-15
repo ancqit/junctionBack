@@ -1,14 +1,16 @@
 """Shop plan and product-pack purchases — activate only after payment completes."""
 
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from bson import ObjectId
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from .access_control import require_store_access
-from .database import products, shop_payments
+from .database import products, shop_payments, users
 from .login import get_current_user
 from .plan_service import (
     PLAN_CATALOG,
@@ -27,7 +29,16 @@ from .product_bucket import (
     apply_bucket_packs,
     build_product_bucket,
 )
-from .roles import UserRole, get_user_role
+from .razorpay_client import (
+    RAZORPAY_KEY_ID,
+    create_order,
+    razorpay_configured,
+    require_razorpay,
+    verify_checkout_signature,
+    verify_webhook_signature,
+    webhook_configured,
+)
+from .roles import UserRole
 from .utils import parse_object_id
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -95,6 +106,23 @@ class FailPaymentRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class RazorpayCheckoutConfirmRequest(BaseModel):
+    razorpay_order_id: str = Field(min_length=1, max_length=80)
+    razorpay_payment_id: str = Field(min_length=1, max_length=80)
+    razorpay_signature: str = Field(min_length=1, max_length=200)
+
+
+class RazorpayOrderResponse(BaseModel):
+    payment_id: str
+    key_id: str
+    order_id: str
+    amount_paise: int
+    currency: str = "INR"
+    name: str = "Junction"
+    description: str
+    prefill: dict[str, str] = Field(default_factory=dict)
+
+
 class ShopPaymentCompleteResponse(BaseModel):
     payment: ShopPayment
     plan: PlanSummary | None = None
@@ -110,6 +138,7 @@ def _ensure_payment_indexes() -> None:
     shop_payments.create_index("store_id")
     shop_payments.create_index("owner_user_id")
     shop_payments.create_index([("store_id", 1), ("status", 1)])
+    shop_payments.create_index("razorpay_order_id", sparse=True)
 
 
 def serialize_payment(document: dict) -> ShopPayment:
@@ -333,6 +362,259 @@ def complete_payment(user: dict, payment_id: str, payload: CompletePaymentReques
         document.update(updates)
 
     return fulfill_paid_payment(user, document)
+
+
+def _owner_user_for_payment(document: dict) -> dict:
+    owner_id = str(document.get("owner_user_id") or "").strip()
+    if owner_id and ObjectId.is_valid(owner_id):
+        owner = users.find_one({"_id": ObjectId(owner_id)})
+        if owner is not None:
+            return owner
+    return {
+        "_id": ObjectId(owner_id) if owner_id and ObjectId.is_valid(owner_id) else ObjectId(),
+        "role": UserRole.owner.value,
+    }
+
+
+def _mark_paid_from_razorpay(
+    document: dict,
+    *,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    source: str,
+) -> dict:
+    """Idempotently mark pending payment paid using Razorpay ids."""
+    status_value = ShopPaymentStatus(document["status"])
+    if status_value == ShopPaymentStatus.paid:
+        return document
+    if status_value in {ShopPaymentStatus.failed, ShopPaymentStatus.cancelled}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot complete a payment in status {document['status']}",
+        )
+
+    stored_order = str(document.get("razorpay_order_id") or "").strip()
+    if stored_order and stored_order != razorpay_order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Razorpay order id does not match this payment",
+        )
+
+    now = utc_now()
+    updates = {
+        "status": ShopPaymentStatus.paid.value,
+        "paid_at": now,
+        "updated_at": now,
+        "payment_method": PaymentMethod.other.value,
+        "payment_reference": razorpay_payment_id,
+        "razorpay_order_id": razorpay_order_id,
+        "razorpay_payment_id": razorpay_payment_id,
+        "razorpay_source": source,
+    }
+    shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
+    document.update(updates)
+    return document
+
+
+def _mark_failed_from_razorpay(document: dict, *, reason: str | None, source: str) -> dict:
+    status_value = ShopPaymentStatus(document["status"])
+    if status_value != ShopPaymentStatus.pending:
+        return document
+    now = utc_now()
+    updates = {
+        "status": ShopPaymentStatus.failed.value,
+        "updated_at": now,
+        "failure_reason": (reason or "").strip() or None,
+        "razorpay_source": source,
+    }
+    shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
+    document.update(updates)
+    return document
+
+
+def confirm_razorpay_checkout(
+    user: dict,
+    payment_id: str,
+    payload: RazorpayCheckoutConfirmRequest,
+) -> ShopPaymentCompleteResponse:
+    """Verify Checkout handler signature, then mark paid and fulfill."""
+    require_razorpay()
+    document = _get_payment_for_user(user, payment_id)
+    order_id = payload.razorpay_order_id.strip()
+    payment_rz = payload.razorpay_payment_id.strip()
+    signature = payload.razorpay_signature.strip()
+
+    if not verify_checkout_signature(
+        razorpay_order_id=order_id,
+        razorpay_payment_id=payment_rz,
+        razorpay_signature=signature,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Razorpay signature verification failed",
+        )
+
+    stored_order = str(document.get("razorpay_order_id") or "").strip()
+    if stored_order and stored_order != order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Razorpay order id does not match this payment",
+        )
+
+    document = _mark_paid_from_razorpay(
+        document,
+        razorpay_order_id=order_id,
+        razorpay_payment_id=payment_rz,
+        source="checkout",
+    )
+    return fulfill_paid_payment(user, document)
+
+
+@router.get("/razorpay/status")
+def razorpay_status() -> dict[str, bool]:
+    """Public readiness probe for Frontweb (key id presence only; secret never returned)."""
+    return {
+        "configured": razorpay_configured(),
+        "webhook_configured": webhook_configured(),
+    }
+
+
+@router.post("/razorpay/webhook")
+async def razorpay_webhook(
+    request: Request,
+    x_razorpay_signature: Annotated[str | None, Header()] = None,
+) -> dict[str, str]:
+    """
+    Server-side confirmation independent of the browser.
+    Subscribe to payment.captured and payment.failed in the Razorpay dashboard.
+    Requires RAZORPAY_WEBHOOK_SECRET.
+    """
+    if not webhook_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Razorpay webhook secret is not configured (RAZORPAY_WEBHOOK_SECRET).",
+        )
+
+    raw = await request.body()
+    if not verify_webhook_signature(raw_body=raw, signature_header=x_razorpay_signature):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook signature")
+
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except Exception as parse_exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid webhook JSON",
+        ) from parse_exc
+
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook JSON")
+
+    event_name = str(event.get("event") or "").strip()
+    payment_entity = (
+        (event.get("payload") or {}).get("payment") or {}
+    ).get("entity") or {}
+    order_id = str(payment_entity.get("order_id") or "").strip()
+    rz_payment_id = str(payment_entity.get("id") or "").strip()
+
+    if not order_id:
+        return {"status": "ignored", "reason": "missing_order_id"}
+
+    document = shop_payments.find_one({"razorpay_order_id": order_id})
+    if document is None:
+        return {"status": "ignored", "reason": "unknown_order"}
+
+    if event_name == "payment.captured":
+        document = _mark_paid_from_razorpay(
+            document,
+            razorpay_order_id=order_id,
+            razorpay_payment_id=rz_payment_id or str(document.get("razorpay_payment_id") or "webhook"),
+            source="webhook",
+        )
+        fulfill_paid_payment(_owner_user_for_payment(document), document)
+        return {"status": "paid"}
+
+    if event_name == "payment.failed":
+        error = payment_entity.get("error_description") or payment_entity.get("error_reason")
+        _mark_failed_from_razorpay(document, reason=str(error) if error else event_name, source="webhook")
+        return {"status": "failed"}
+
+    return {"status": "ignored", "reason": event_name or "unknown_event"}
+
+
+@router.post("/{payment_id}/razorpay/order", response_model=RazorpayOrderResponse)
+def create_razorpay_order_for_payment(
+    payment_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RazorpayOrderResponse:
+    """Create (or reuse) a Razorpay order for a pending shop payment — Standard Checkout step 1."""
+    require_razorpay()
+    document = _get_payment_for_user(current_user, payment_id)
+    if ShopPaymentStatus(document["status"]) != ShopPaymentStatus.pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot create Razorpay order for status {document['status']}",
+        )
+
+    amount_inr = int(document["amount_inr"])
+    existing_order = str(document.get("razorpay_order_id") or "").strip()
+    if existing_order and int(document.get("razorpay_amount_inr") or amount_inr) == amount_inr:
+        order_id = existing_order
+        amount_paise = amount_inr * 100
+    else:
+        order = create_order(
+            amount_inr=amount_inr,
+            receipt=str(document["_id"]),
+            notes={
+                "payment_id": str(document["_id"]),
+                "store_id": str(document["store_id"]),
+                "kind": str(document["kind"]),
+            },
+        )
+        order_id = str(order["id"])
+        amount_paise = int(order.get("amount") or amount_inr * 100)
+        now = utc_now()
+        updates = {
+            "razorpay_order_id": order_id,
+            "razorpay_amount_inr": amount_inr,
+            "updated_at": now,
+        }
+        shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
+        document.update(updates)
+
+    prefill: dict[str, str] = {}
+    phone = str(current_user.get("phone_number") or "").strip()
+    email = str(current_user.get("email") or "").strip()
+    name = str(current_user.get("display_name") or "").strip()
+    if phone:
+        prefill["contact"] = phone.lstrip("+") if phone.startswith("+91") else phone
+    if email:
+        prefill["email"] = email
+    if name:
+        prefill["name"] = name
+
+    return RazorpayOrderResponse(
+        payment_id=str(document["_id"]),
+        key_id=RAZORPAY_KEY_ID,
+        order_id=order_id,
+        amount_paise=amount_paise,
+        currency=str(document.get("currency") or "INR"),
+        description=str(document.get("description") or "Junction plan payment"),
+        prefill=prefill,
+    )
+
+
+@router.post("/{payment_id}/razorpay/confirm", response_model=ShopPaymentCompleteResponse)
+def confirm_razorpay_payment(
+    payment_id: str,
+    payload: RazorpayCheckoutConfirmRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> ShopPaymentCompleteResponse:
+    """
+    Verify Checkout success signature (HMAC SHA256) then activate plan/packs.
+    Prefer this after the Angular handler; webhook remains the reliability backstop.
+    """
+    return confirm_razorpay_checkout(current_user, payment_id, payload)
 
 
 @router.get("", response_model=list[ShopPayment])
