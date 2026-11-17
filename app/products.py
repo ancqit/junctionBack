@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 from enum import Enum
+from io import BytesIO
 import re
 from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -22,10 +23,13 @@ from .product_categories import PRODUCT_CATEGORIES, ProductCategoryInfo
 from .product_images import (
     delete_product_image,
     fetch_image_from_cdn,
-    get_product_image,
+    get_product_image_with_meta,
+    optimize_product_image,
+    publish_product_image_cdn,
     save_product_image,
     validate_image_upload,
 )
+from .r2_media import r2_configured
 from .queries import ProductImageSuggestResponse, collect_suggested_images, request_base_url
 from .rate_limit import RATE_LIMIT_AI, RATE_LIMIT_CATALOG, limiter
 from .roles import UserRole, get_user_role
@@ -363,11 +367,57 @@ def suggest_product_images(
     )
 
 
-@router.get("/images/{stored_image_id}")
-def get_stored_product_image(stored_image_id: str, _: CatalogReader) -> StreamingResponse:
-    """Serve a stored product image (owner app or junction.today session)."""
-    stream, content_type, filename = get_product_image(stored_image_id)
-    return StreamingResponse(stream, media_type=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
+def _persist_stored_image_cdn(stored_image_id: str, cdn_url: str) -> None:
+    """Write CDN URL onto product.image / product.images entries for this GridFS id."""
+    products.update_many(
+        {"images.stored_image_id": stored_image_id},
+        {"$set": {"images.$[img].cdn": cdn_url}},
+        array_filters=[{"img.stored_image_id": stored_image_id}],
+    )
+    products.update_many(
+        {"image.stored_image_id": stored_image_id},
+        {"$set": {"image.cdn": cdn_url, "image_cdn": cdn_url, "image_url": cdn_url}},
+    )
+
+
+@router.get("/images/{stored_image_id}", response_model=None)
+def get_stored_product_image(
+    stored_image_id: str,
+    _: CatalogReader,
+) -> RedirectResponse | StreamingResponse:
+    """
+    Serve a stored product image (owner app or junction.today session).
+    Prefer CDN redirect when published to R2. Legacy full-size uploads may be
+    optimized + published on first request so catalog clients stop pulling blobs.
+    """
+    stream, content_type, filename, meta = get_product_image_with_meta(stored_image_id)
+    meta_cdn = str(meta.get("cdn") or "").strip()
+    if meta_cdn.startswith("http"):
+        return RedirectResponse(url=meta_cdn, status_code=status.HTTP_302_FOUND)
+
+    body = stream.read()
+
+    if r2_configured():
+        try:
+            optimized, out_type, ext = optimize_product_image(body, content_type)
+            published = publish_product_image_cdn(optimized, content_type=out_type, ext=ext)
+        except HTTPException:
+            published = None
+            optimized, out_type = body, content_type
+        if published:
+            cdn_url, _key = published
+            _persist_stored_image_cdn(stored_image_id, cdn_url)
+            return RedirectResponse(url=cdn_url, status_code=status.HTTP_302_FOUND)
+        body, content_type = optimized, out_type
+
+    return StreamingResponse(
+        BytesIO(body),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, max-age=86400",
+        },
+    )
 
 
 @router.get("", response_model=list[Product])
@@ -818,9 +868,12 @@ async def upload_product_image(
         source=ProductImageSource.upload.value,
         product_id=product_id,
         store_id=product.get("store_id"),
+        optimize=True,
+        publish_cdn=True,
     )
     image = ProductImage(
         source=ProductImageSource.upload,
+        cdn=stored.cdn,
         stored_image_id=str(stored.file_id),
         content_type=stored.content_type,
         filename=stored.filename,
