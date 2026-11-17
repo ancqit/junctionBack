@@ -24,7 +24,12 @@ R2_SIGN_EXPIRES_SECONDS = int(os.getenv("R2_SIGN_EXPIRES_SECONDS") or "600")
 # Long edge cache — shorts are immutable keys (uuid filename).
 R2_CACHE_CONTROL = (os.getenv("R2_CACHE_CONTROL") or "public, max-age=31536000, immutable").strip()
 
-_KEY_RE = re.compile(r"^shorts/[a-zA-Z0-9_-]+\.(mp4|webm|mov|m4a|mp3|wav|aac|jpg|jpeg|png|webp)$")
+_KEY_RE = re.compile(
+    r"^(?:"
+    r"shorts/[a-zA-Z0-9_-]+\.(mp4|webm|mov|m4a|mp3|wav|aac|jpg|jpeg|png|webp)"
+    r"|products/[a-f0-9]{32}(?:-thumb)?\.(jpg|jpeg|png|webp)"
+    r")$"
+)
 
 _KIND_EXTS = {
     "video": {
@@ -180,6 +185,17 @@ def new_object_key(kind: MediaKind, content_type: str) -> str:
 def new_playback_key() -> str:
     """Immutable H.264 feed rendition key (always .mp4)."""
     return f"shorts/{uuid.uuid4().hex}-playback.mp4"
+
+
+def new_product_image_key(*, thumb: bool = False, ext: str = ".jpg") -> str:
+    """Immutable product catalog image key under products/ (CDN-public)."""
+    suffix = (ext or ".jpg").lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        suffix = ".jpg"
+    if suffix == ".jpeg":
+        suffix = ".jpg"
+    token = uuid.uuid4().hex
+    return f"products/{token}-thumb{suffix}" if thumb else f"products/{token}{suffix}"
 
 
 def put_bytes(
