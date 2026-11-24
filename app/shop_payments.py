@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from pydantic import BaseModel, Field
 
 from .access_control import require_store_access
-from .database import products, shop_payments, users
+from .database import shop_payments, users
 from .login import get_current_user
 from .plan_service import (
     PLAN_CATALOG,
@@ -43,6 +43,9 @@ from .utils import parse_object_id
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
+# Junction shop plan/pack checkout — GST on taxable base (Razorpay charges total).
+GST_RATE = 0.18
+
 
 class PaymentKind(str, Enum):
     plan = "plan"
@@ -72,6 +75,9 @@ class ShopPayment(BaseModel):
     status: ShopPaymentStatus
     amount_inr: int
     currency: str = "INR"
+    base_amount_inr: int | None = None
+    gst_rate: float | None = None
+    gst_amount_inr: int | None = None
     plan_type: PlanType | None = None
     packs: int | None = None
     slots: int | None = None
@@ -134,6 +140,18 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def apply_gst(base_amount_inr: int) -> dict[str, float | int]:
+    """Return taxable base, GST (18%), and Razorpay total (base + GST)."""
+    base = max(0, int(base_amount_inr))
+    gst = int(round(base * GST_RATE))
+    return {
+        "base_amount_inr": base,
+        "gst_rate": GST_RATE,
+        "gst_amount_inr": gst,
+        "amount_inr": base + gst,
+    }
+
+
 def _ensure_payment_indexes() -> None:
     shop_payments.create_index("store_id")
     shop_payments.create_index("owner_user_id")
@@ -142,14 +160,21 @@ def _ensure_payment_indexes() -> None:
 
 
 def serialize_payment(document: dict) -> ShopPayment:
+    amount = int(document["amount_inr"])
+    base = document.get("base_amount_inr")
+    gst_amount = document.get("gst_amount_inr")
+    gst_rate = document.get("gst_rate")
     return ShopPayment(
         id=str(document["_id"]),
         store_id=document["store_id"],
         owner_user_id=document["owner_user_id"],
         kind=PaymentKind(document["kind"]),
         status=ShopPaymentStatus(document["status"]),
-        amount_inr=int(document["amount_inr"]),
+        amount_inr=amount,
         currency=document.get("currency", "INR"),
+        base_amount_inr=int(base) if base is not None else amount,
+        gst_rate=float(gst_rate) if gst_rate is not None else None,
+        gst_amount_inr=int(gst_amount) if gst_amount is not None else None,
         plan_type=PlanType(document["plan_type"]) if document.get("plan_type") else None,
         packs=document.get("packs"),
         slots=document.get("slots"),
@@ -178,12 +203,13 @@ def create_plan_purchase(user: dict, store_id: str, plan_type: PlanType) -> Shop
 
     shop = _require_shop_access(user, store_id)
     details = PLAN_CATALOG[plan_type.value]
-    amount = int(details["price_inr"])
-    if amount <= 0:
+    base_amount = int(details["price_inr"])
+    if base_amount <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This plan does not require payment. Contact support if activation is stuck.",
         )
+    priced = apply_gst(base_amount)
 
     now = utc_now()
     _ensure_payment_indexes()
@@ -193,6 +219,7 @@ def create_plan_purchase(user: dict, store_id: str, plan_type: PlanType) -> Shop
             "store_id": store_id,
             "kind": PaymentKind.plan.value,
             "status": ShopPaymentStatus.pending.value,
+            "dismissed_at": {"$exists": False},
         },
         {"$set": {"status": ShopPaymentStatus.cancelled.value, "updated_at": now}},
     )
@@ -202,12 +229,18 @@ def create_plan_purchase(user: dict, store_id: str, plan_type: PlanType) -> Shop
         "owner_user_id": str(shop.get("owner_user_id") or user["_id"]),
         "kind": PaymentKind.plan.value,
         "status": ShopPaymentStatus.pending.value,
-        "amount_inr": amount,
+        "amount_inr": priced["amount_inr"],
+        "base_amount_inr": priced["base_amount_inr"],
+        "gst_rate": priced["gst_rate"],
+        "gst_amount_inr": priced["gst_amount_inr"],
         "currency": "INR",
         "plan_type": plan_type.value,
         "packs": None,
         "slots": None,
-        "description": f"{details['name']} plan for shop ({details['max_products']} products / 1 year)",
+        "description": (
+            f"{details['name']} plan for shop ({details['max_products']} products / 1 year) "
+            f"+ 18% GST"
+        ),
         "payment_method": None,
         "payment_reference": None,
         "created_at": now,
@@ -236,18 +269,8 @@ def create_pack_purchase(user: dict, store_id: str, packs: int) -> ShopPayment:
             detail="This shop plan already allows unlimited products; packs are not needed.",
         )
 
-    products_count = products.count_documents({"store_id": store_id})
-    if products_count < summary.max_products:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"This shop still has plan allowance remaining "
-                f"({products_count}/{summary.max_products}). "
-                "Buy packs after the plan products are used."
-            ),
-        )
-
-    amount = packs * BUCKET_PACK_PRICE_INR
+    # Bucket add-ons may be billed on their own (plan-only / bucket-only are separate).
+    priced = apply_gst(packs * BUCKET_PACK_PRICE_INR)
     slots = packs * BUCKET_PACK_SIZE
     now = utc_now()
     _ensure_payment_indexes()
@@ -256,12 +279,15 @@ def create_pack_purchase(user: dict, store_id: str, packs: int) -> ShopPayment:
         "owner_user_id": str(shop.get("owner_user_id") or user["_id"]),
         "kind": PaymentKind.product_pack.value,
         "status": ShopPaymentStatus.pending.value,
-        "amount_inr": amount,
+        "amount_inr": priced["amount_inr"],
+        "base_amount_inr": priced["base_amount_inr"],
+        "gst_rate": priced["gst_rate"],
+        "gst_amount_inr": priced["gst_amount_inr"],
         "currency": "INR",
         "plan_type": None,
         "packs": packs,
         "slots": slots,
-        "description": f"{packs} product pack(s) (+{slots} products) for shop",
+        "description": f"{packs} product pack(s) (+{slots} products) for shop + 18% GST",
         "payment_method": None,
         "payment_reference": None,
         "created_at": now,
@@ -622,10 +648,51 @@ def list_shop_payments(
     current_user: Annotated[dict, Depends(get_current_user)],
     store_id: Annotated[str, Query(min_length=1, max_length=80)],
 ) -> list[ShopPayment]:
-    """List plan/pack payment attempts for a shop."""
+    """List plan/pack payment attempts for a shop (hides dismissed rows)."""
     _require_shop_access(current_user, store_id.strip())
-    documents = shop_payments.find({"store_id": store_id.strip()}).sort("created_at", -1)
+    documents = shop_payments.find(
+        {"store_id": store_id.strip(), "dismissed_at": {"$exists": False}}
+    ).sort("created_at", -1)
     return [serialize_payment(doc) for doc in documents]
+
+
+@router.post("/clear")
+def clear_shop_payments(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    store_id: Annotated[str, Query(min_length=1, max_length=80)],
+) -> dict[str, int]:
+    """
+    Clear unpaid noise for a shop: cancel pending, dismiss failed/cancelled.
+    Paid rows are left alone.
+    """
+    store = store_id.strip()
+    _require_shop_access(current_user, store)
+    now = utc_now()
+    cancelled = shop_payments.update_many(
+        {
+            "store_id": store,
+            "status": ShopPaymentStatus.pending.value,
+            "dismissed_at": {"$exists": False},
+        },
+        {"$set": {"status": ShopPaymentStatus.cancelled.value, "updated_at": now}},
+    )
+    dismissed = shop_payments.update_many(
+        {
+            "store_id": store,
+            "status": {
+                "$in": [
+                    ShopPaymentStatus.failed.value,
+                    ShopPaymentStatus.cancelled.value,
+                ]
+            },
+            "dismissed_at": {"$exists": False},
+        },
+        {"$set": {"dismissed_at": now, "updated_at": now}},
+    )
+    return {
+        "cancelled": int(cancelled.modified_count),
+        "dismissed": int(dismissed.modified_count),
+    }
 
 
 @router.get("/{payment_id}", response_model=ShopPayment)
@@ -633,7 +700,10 @@ def get_payment(
     payment_id: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> ShopPayment:
-    return serialize_payment(_get_payment_for_user(current_user, payment_id))
+    document = _get_payment_for_user(current_user, payment_id)
+    if document.get("dismissed_at") is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+    return serialize_payment(document)
 
 
 @router.post("/{payment_id}/complete", response_model=ShopPaymentCompleteResponse)
@@ -667,6 +737,51 @@ def mark_payment_failed(
         "updated_at": now,
         "failure_reason": (payload.reason or "").strip() or None,
     }
+    shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
+    document.update(updates)
+    return serialize_payment(document)
+
+
+@router.post("/{payment_id}/cancel", response_model=ShopPayment)
+def cancel_shop_payment(
+    payment_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> ShopPayment:
+    """Cancel a pending payment so it leaves the active queue."""
+    document = _get_payment_for_user(current_user, payment_id)
+    if ShopPaymentStatus(document["status"]) != ShopPaymentStatus.pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot cancel a payment in status {document['status']}",
+        )
+    now = utc_now()
+    updates = {
+        "status": ShopPaymentStatus.cancelled.value,
+        "updated_at": now,
+        "dismissed_at": now,
+    }
+    shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
+    document.update(updates)
+    return serialize_payment(document)
+
+
+@router.post("/{payment_id}/dismiss", response_model=ShopPayment)
+def dismiss_shop_payment(
+    payment_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> ShopPayment:
+    """Remove a pending/failed/cancelled payment from the queue (paid rows stay)."""
+    document = _get_payment_for_user(current_user, payment_id)
+    status_value = ShopPaymentStatus(document["status"])
+    if status_value == ShopPaymentStatus.paid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Paid payments cannot be deleted",
+        )
+    now = utc_now()
+    updates: dict = {"dismissed_at": now, "updated_at": now}
+    if status_value == ShopPaymentStatus.pending:
+        updates["status"] = ShopPaymentStatus.cancelled.value
     shop_payments.update_one({"_id": document["_id"]}, {"$set": updates})
     document.update(updates)
     return serialize_payment(document)
