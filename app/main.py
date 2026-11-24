@@ -82,6 +82,13 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:
             # Never block boot — daily cron / admin button remain available.
             print(f"startup plan enforce failed: {exc}", flush=True)
+    # Optional payments / Frontweb QA owner (TEST_USER_PHONE + TEST_USER_MPIN).
+    try:
+        from .test_user_seed import ensure_test_user
+
+        ensure_test_user()
+    except Exception as exc:
+        print(f"test user seed failed: {exc}", flush=True)
     yield
 
 
