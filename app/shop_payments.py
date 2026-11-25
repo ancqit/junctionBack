@@ -50,6 +50,7 @@ GST_RATE = 0.18
 class PaymentKind(str, Enum):
     plan = "plan"
     product_pack = "product_pack"
+    plan_and_pack = "plan_and_pack"
 
 
 class ShopPaymentStatus(str, Enum):
@@ -100,6 +101,19 @@ class PackPurchaseRequest(BaseModel):
         ge=1,
         le=MAX_PACKS_PER_REQUEST,
         description=f"Number of packs. Each pack = {BUCKET_PACK_SIZE} products for INR {BUCKET_PACK_PRICE_INR}.",
+    )
+
+
+class PreparePurchaseRequest(BaseModel):
+    """One Razorpay bill: plan-only, pack-only, or plan + packs together."""
+
+    store_id: str = Field(min_length=1, max_length=80)
+    plan_type: PlanType | None = None
+    packs: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_PACKS_PER_REQUEST,
+        description=f"Optional packs. Each pack = {BUCKET_PACK_SIZE} products for INR {BUCKET_PACK_PRICE_INR}.",
     )
 
 
@@ -195,99 +209,149 @@ def _require_shop_access(user: dict, store_id: str) -> dict:
 
 
 def create_plan_purchase(user: dict, store_id: str, plan_type: PlanType) -> ShopPayment:
+    return create_prepared_purchase(
+        user,
+        PreparePurchaseRequest(store_id=store_id, plan_type=plan_type, packs=0),
+    )
+
+
+def create_pack_purchase(user: dict, store_id: str, packs: int) -> ShopPayment:
+    return create_prepared_purchase(
+        user,
+        PreparePurchaseRequest(store_id=store_id, plan_type=None, packs=packs),
+    )
+
+
+def _zero_priced() -> dict[str, float | int]:
+    return {
+        "base_amount_inr": 0,
+        "gst_rate": GST_RATE,
+        "gst_amount_inr": 0,
+        "amount_inr": 0,
+    }
+
+
+def create_prepared_purchase(user: dict, payload: PreparePurchaseRequest) -> ShopPayment:
+    """
+    Build one pending payment for Razorpay:
+    plan-only, pack-only, or plan + packs on a single bill (per-line 18% GST).
+    """
+    store_id = payload.store_id.strip()
+    shop = _require_shop_access(user, store_id)
+
+    plan_type = payload.plan_type
+    packs = int(payload.packs or 0)
     if plan_type == PlanType.free_trial:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Free trial starts automatically when the shop is created; no payment needed.",
         )
 
-    shop = _require_shop_access(user, store_id)
-    details = PLAN_CATALOG[plan_type.value]
-    base_amount = int(details["price_inr"])
-    if base_amount <= 0:
+    has_plan = plan_type is not None
+    has_packs = packs > 0
+    if not has_plan and not has_packs:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This plan does not require payment. Contact support if activation is stuck.",
+            detail="Select a plan and/or at least one product pack.",
         )
-    priced = apply_gst(base_amount)
+
+    plan_base = 0
+    plan_name = ""
+    plan_max: int | None = None
+    if has_plan:
+        assert plan_type is not None
+        details = PLAN_CATALOG[plan_type.value]
+        plan_base = int(details["price_inr"])
+        plan_name = str(details["name"])
+        plan_max = details.get("max_products")
+        if plan_base <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This plan does not require payment. Contact support if activation is stuck.",
+            )
+
+    if has_packs:
+        # Packs need a product-capable plan after fulfillment (selected now or already active).
+        if has_plan:
+            if plan_max == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This shop plan does not include products. Choose a product plan first.",
+                )
+            if plan_max is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This shop plan already allows unlimited products; packs are not needed.",
+                )
+        else:
+            _, summary = require_active_shop_plan(store_id)
+            if summary.profile_only:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This shop plan does not include products. Purchase a product plan first.",
+                )
+            if summary.max_products is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This shop plan already allows unlimited products; packs are not needed.",
+                )
+
+    pack_base = packs * BUCKET_PACK_PRICE_INR if has_packs else 0
+    slots = packs * BUCKET_PACK_SIZE if has_packs else 0
+    plan_priced = apply_gst(plan_base) if plan_base else _zero_priced()
+    pack_priced = apply_gst(pack_base) if pack_base else _zero_priced()
+    base_amount = int(plan_priced["base_amount_inr"]) + int(pack_priced["base_amount_inr"])
+    gst_amount = int(plan_priced["gst_amount_inr"]) + int(pack_priced["gst_amount_inr"])
+    amount_inr = int(plan_priced["amount_inr"]) + int(pack_priced["amount_inr"])
+
+    if has_plan and has_packs:
+        kind = PaymentKind.plan_and_pack
+        description = (
+            f"{plan_name} plan + {packs} product pack(s) (+{slots} products) + 18% GST"
+        )
+    elif has_plan:
+        kind = PaymentKind.plan
+        description = (
+            f"{plan_name} plan for shop ({plan_max} products / 1 year) + 18% GST"
+        )
+    else:
+        kind = PaymentKind.product_pack
+        description = f"{packs} product pack(s) (+{slots} products) for shop + 18% GST"
 
     now = utc_now()
     _ensure_payment_indexes()
-    # Cancel prior pending plan purchases for this shop so only one is active.
+    # One active unpaid checkout per shop — cancel prior pending noise.
     shop_payments.update_many(
         {
             "store_id": store_id,
-            "kind": PaymentKind.plan.value,
             "status": ShopPaymentStatus.pending.value,
             "dismissed_at": {"$exists": False},
         },
-        {"$set": {"status": ShopPaymentStatus.cancelled.value, "updated_at": now}},
+        {
+            "$set": {
+                "status": ShopPaymentStatus.cancelled.value,
+                "updated_at": now,
+                "dismissed_at": now,
+            }
+        },
     )
 
     document = {
         "store_id": store_id,
         "owner_user_id": str(shop.get("owner_user_id") or user["_id"]),
-        "kind": PaymentKind.plan.value,
+        "kind": kind.value,
         "status": ShopPaymentStatus.pending.value,
-        "amount_inr": priced["amount_inr"],
-        "base_amount_inr": priced["base_amount_inr"],
-        "gst_rate": priced["gst_rate"],
-        "gst_amount_inr": priced["gst_amount_inr"],
+        "amount_inr": amount_inr,
+        "base_amount_inr": base_amount,
+        "gst_rate": GST_RATE,
+        "gst_amount_inr": gst_amount,
+        "plan_base_amount_inr": int(plan_priced["base_amount_inr"]) or None,
+        "pack_base_amount_inr": int(pack_priced["base_amount_inr"]) or None,
         "currency": "INR",
-        "plan_type": plan_type.value,
-        "packs": None,
-        "slots": None,
-        "description": (
-            f"{details['name']} plan for shop ({details['max_products']} products / 1 year) "
-            f"+ 18% GST"
-        ),
-        "payment_method": None,
-        "payment_reference": None,
-        "created_at": now,
-        "updated_at": now,
-        "paid_at": None,
-        "fulfilled_at": None,
-    }
-    result = shop_payments.insert_one(document)
-    document["_id"] = result.inserted_id
-    return serialize_payment(document)
-
-
-def create_pack_purchase(user: dict, store_id: str, packs: int) -> ShopPayment:
-    store_id = store_id.strip()
-    shop = _require_shop_access(user, store_id)
-    _, summary = require_active_shop_plan(store_id)
-
-    if summary.profile_only:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This shop plan does not include products. Purchase a product plan first.",
-        )
-    if summary.max_products is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This shop plan already allows unlimited products; packs are not needed.",
-        )
-
-    # Bucket add-ons may be billed on their own (plan-only / bucket-only are separate).
-    priced = apply_gst(packs * BUCKET_PACK_PRICE_INR)
-    slots = packs * BUCKET_PACK_SIZE
-    now = utc_now()
-    _ensure_payment_indexes()
-    document = {
-        "store_id": store_id,
-        "owner_user_id": str(shop.get("owner_user_id") or user["_id"]),
-        "kind": PaymentKind.product_pack.value,
-        "status": ShopPaymentStatus.pending.value,
-        "amount_inr": priced["amount_inr"],
-        "base_amount_inr": priced["base_amount_inr"],
-        "gst_rate": priced["gst_rate"],
-        "gst_amount_inr": priced["gst_amount_inr"],
-        "currency": "INR",
-        "plan_type": None,
-        "packs": packs,
-        "slots": slots,
-        "description": f"{packs} product pack(s) (+{slots} products) for shop + 18% GST",
+        "plan_type": plan_type.value if has_plan and plan_type is not None else None,
+        "packs": packs if has_packs else None,
+        "slots": slots if has_packs else None,
+        "description": description,
         "payment_method": None,
         "payment_reference": None,
         "created_at": now,
@@ -309,7 +373,7 @@ def _get_payment_for_user(user: dict, payment_id: str) -> dict:
 
 
 def fulfill_paid_payment(user: dict, document: dict) -> ShopPaymentCompleteResponse:
-    """Apply plan or packs after payment is marked paid. Idempotent if already fulfilled."""
+    """Apply plan and/or packs after payment is marked paid. Idempotent if already fulfilled."""
     store_id = document["store_id"]
     kind = PaymentKind(document["kind"])
     now = utc_now()
@@ -317,7 +381,7 @@ def fulfill_paid_payment(user: dict, document: dict) -> ShopPaymentCompleteRespo
     if document.get("fulfilled_at") is not None and document.get("status") == ShopPaymentStatus.paid.value:
         plan = build_shop_plan_summary(get_shop_document(store_id))
         bucket = None
-        if kind == PaymentKind.product_pack:
+        if kind in {PaymentKind.product_pack, PaymentKind.plan_and_pack}:
             bucket = build_product_bucket(user, store_id)
         return ShopPaymentCompleteResponse(
             payment=serialize_payment(document),
@@ -326,40 +390,40 @@ def fulfill_paid_payment(user: dict, document: dict) -> ShopPaymentCompleteRespo
             message="Payment already completed; plan/products capacity is active.",
         )
 
-    if kind == PaymentKind.plan:
+    plan = None
+    bucket = None
+    messages: list[str] = []
+
+    if kind in {PaymentKind.plan, PaymentKind.plan_and_pack}:
         plan_type = PlanType(document["plan_type"])
         plan = select_plan_for_shop(store_id, plan_type)
-        shop_payments.update_one(
-            {"_id": document["_id"]},
-            {"$set": {"fulfilled_at": now, "updated_at": now}},
-        )
-        document["fulfilled_at"] = now
-        document["updated_at"] = now
-        return ShopPaymentCompleteResponse(
-            payment=serialize_payment(document),
-            plan=plan,
-            product_bucket=None,
-            message=(
-                f"{plan.name} is now active for this shop. "
-                f"You can add up to {plan.max_products} products."
-            ),
+        messages.append(
+            f"{plan.name} is now active for this shop. "
+            f"You can add up to {plan.max_products} products."
         )
 
-    packs = int(document["packs"])
-    apply_bucket_packs(store_id, packs)
+    if kind in {PaymentKind.product_pack, PaymentKind.plan_and_pack}:
+        packs = int(document["packs"])
+        apply_bucket_packs(store_id, packs)
+        bucket = build_product_bucket(user, store_id)
+        messages.append(
+            f"Added {packs * BUCKET_PACK_SIZE} product slots. You can add more products now."
+        )
+
+    if plan is None:
+        plan = build_shop_plan_summary(get_shop_document(store_id))
+
     shop_payments.update_one(
         {"_id": document["_id"]},
         {"$set": {"fulfilled_at": now, "updated_at": now}},
     )
     document["fulfilled_at"] = now
     document["updated_at"] = now
-    bucket = build_product_bucket(user, store_id)
-    plan = build_shop_plan_summary(get_shop_document(store_id))
     return ShopPaymentCompleteResponse(
         payment=serialize_payment(document),
         plan=plan,
         product_bucket=bucket,
-        message=f"Added {packs * BUCKET_PACK_SIZE} product slots. You can add more products now.",
+        message=" ".join(messages) or "Payment completed.",
     )
 
 
@@ -641,6 +705,18 @@ def confirm_razorpay_payment(
     Prefer this after the Angular handler; webhook remains the reliability backstop.
     """
     return confirm_razorpay_checkout(current_user, payment_id, payload)
+
+
+@router.post("/prepare", response_model=ShopPayment, status_code=status.HTTP_201_CREATED)
+def prepare_shop_payment(
+    payload: PreparePurchaseRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> ShopPayment:
+    """
+    Create one pending Razorpay bill for plan-only, pack-only, or plan + packs.
+    Amount includes 18% GST per line (plan and packs taxed separately, then summed).
+    """
+    return create_prepared_purchase(current_user, payload)
 
 
 @router.get("", response_model=list[ShopPayment])

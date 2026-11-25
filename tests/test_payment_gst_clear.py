@@ -45,3 +45,10 @@ def test_ensure_test_user_skips_partial_env(monkeypatch):
     monkeypatch.setenv("TEST_USER_PHONE", "+919876543210")
     monkeypatch.delenv("TEST_USER_MPIN", raising=False)
     assert ensure_test_user() is None
+
+
+def test_combined_bill_sums_per_line_gst():
+    """Plan + pack Razorpay total = gst(plan) + gst(pack)."""
+    plan = apply_gst(2999)
+    pack = apply_gst(999)
+    assert plan["amount_inr"] + pack["amount_inr"] == 2999 + 180 + 999 + 180
